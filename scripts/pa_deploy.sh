@@ -103,6 +103,15 @@ echo "    venv:     $VENV_DIR"
 echo "    wsgi:     $WSGI_FILE"
 echo
 
+# Files API existence check (needs no console): true if the path exists on PA.
+# GET .../files/path/<p> returns 200 for an existing file or directory, 404 if
+# it's missing.
+pa_path_exists() {
+  local code
+  code=$(curl -sS -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$PA_API/files/path${1}")
+  [ "$code" = "200" ]
+}
+
 # --- 1. Verify API token works -----------------------------------------------
 echo "==> Verifying PA API token..."
 cpu_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$PA_API/cpu/")
@@ -112,30 +121,47 @@ if [ "$cpu_status" != "200" ]; then
 fi
 
 # --- 2. Create web app (idempotent) ------------------------------------------
+# Detect existence via the LIST endpoint, not GET /webapps/<domain>/: PA returns
+# 403 ("You do not have permission to perform this action.") — NOT 404 — for a
+# domain with no web app (e.g. right after you delete one in the Web tab), so a
+# per-domain status check can't tell "missing" apart from "forbidden". The list
+# is unambiguous.
 echo "==> Ensuring web app exists..."
-webapp_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$PA_API/webapps/$DOMAIN/")
-case "$webapp_status" in
-  200)
-    echo "    Web app already exists."
-    ;;
-  404)
-    echo "    Creating web app ($PYTHON_VERSION)..."
-    create_resp=$(curl -sS -w "\n%{http_code}" -H "$AUTH_HEADER" \
-      --data-urlencode "domain_name=$DOMAIN" \
-      --data-urlencode "python_version=$PYTHON_VERSION" \
-      "$PA_API/webapps/")
-    code="${create_resp##*$'\n'}"
-    body="${create_resp%$'\n'*}"
-    if [ "$code" != "201" ] && [ "$code" != "200" ]; then
-      echo "ERROR: web app create failed (HTTP $code): $body" >&2
-      exit 1
-    fi
-    ;;
-  *)
-    echo "ERROR: unexpected status $webapp_status checking web app." >&2
+webapps_json=$(curl -sS -H "$AUTH_HEADER" "$PA_API/webapps/")
+webapp_exists=$(printf '%s' "$webapps_json" | python3 -c "
+import json, sys
+try:
+    apps = json.load(sys.stdin)
+except Exception:
+    apps = []
+print('yes' if isinstance(apps, list) and any(a.get('domain_name') == sys.argv[1] for a in apps) else 'no')
+" "$DOMAIN")
+
+if [ "$webapp_exists" = "yes" ]; then
+  echo "    Web app already exists."
+else
+  echo "    Creating web app ($PYTHON_VERSION)..."
+  create_resp=$(curl -sS -w $'\n%{http_code}' -H "$AUTH_HEADER" \
+    --data-urlencode "domain_name=$DOMAIN" \
+    --data-urlencode "python_version=$PYTHON_VERSION" \
+    "$PA_API/webapps/")
+  code="${create_resp##*$'\n'}"
+  body="${create_resp%$'\n'*}"
+  if [ "$code" != "201" ] && [ "$code" != "200" ]; then
+    echo "ERROR: web app create failed (HTTP $code): $body" >&2
     exit 1
-    ;;
-esac
+  fi
+fi
+
+# If the clone and virtualenv are already on PA (e.g. the web app was deleted in
+# the Web tab but the home directory survived), the console-driven steps below
+# are no-ops. Skip them entirely so a web-app-only recovery runs fully headless
+# and doesn't need the one-time browser console init. NOTE: this skips
+# `git pull` and `pip install`, so if you changed requirements.txt, delete the
+# venv (or re-run from a fresh PA bash console) to force a reinstall.
+if pa_path_exists "$PROJECT_DIR/.git" && pa_path_exists "$VENV_DIR/bin/python"; then
+  echo "==> Clone + virtualenv already present on PA — skipping console setup."
+else
 
 # --- 3. Find or create a bash console ----------------------------------------
 # Reuse an already-initialized bash console if there is one — saves the user
@@ -235,6 +261,8 @@ run_remote "pip install requirements" \
   "$VENV_DIR/bin/pip install --upgrade pip && $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt" \
   300
 
+fi  # end "skip console setup when clone + venv already present" guard
+
 # --- 5. Upload .env to PA ----------------------------------------------------
 echo "==> Generating PA-side .env..."
 TMP_ENV="$(mktemp -t pa_env.XXXXXX)"
@@ -289,15 +317,33 @@ case "$wsgi_status" in
 esac
 
 # --- 7. Point the web app at source dir + virtualenv -------------------------
+# The 2026-06 outage happened because these two values drifted (source_directory
+# was stuck at /var/www, virtualenv_path was blank). So we PATCH them *and* read
+# the values back out of the response to confirm the change actually took — a
+# 200 alone isn't proof the new values stuck.
 echo "==> Configuring web app source + virtualenv..."
-patch_status=$(curl -sS -o /dev/null -w "%{http_code}" -X PATCH -H "$AUTH_HEADER" \
+patch_resp=$(curl -sS -w $'\n%{http_code}' -X PATCH -H "$AUTH_HEADER" \
   --data-urlencode "source_directory=$PROJECT_DIR" \
   --data-urlencode "virtualenv_path=$VENV_DIR" \
   "$PA_API/webapps/$DOMAIN/")
-case "$patch_status" in
-  200) ;;
-  *) echo "ERROR: web app config failed (HTTP $patch_status)." >&2; exit 1 ;;
-esac
+patch_code="${patch_resp##*$'\n'}"
+patch_body="${patch_resp%$'\n'*}"
+if [ "$patch_code" != "200" ]; then
+  echo "ERROR: web app config failed (HTTP $patch_code): $patch_body" >&2
+  exit 1
+fi
+printf '%s' "$patch_body" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+want_sd, want_vp = sys.argv[1], sys.argv[2]
+sd, vp = d.get('source_directory'), d.get('virtualenv_path')
+print(f'    source_directory = {sd}')
+print(f'    virtualenv_path  = {vp}')
+sys.exit(0 if (sd == want_sd and vp == want_vp) else 1)
+" "$PROJECT_DIR" "$VENV_DIR" || {
+  echo "ERROR: web app config did not take effect (values above don't match what we set)." >&2
+  exit 1
+}
 
 # --- 8. Reload ---------------------------------------------------------------
 echo "==> Reloading web app..."
@@ -308,14 +354,37 @@ case "$reload_status" in
   *) echo "WARNING: reload returned HTTP $reload_status. Try clicking Reload in the PA Web tab if the bot is silent." >&2 ;;
 esac
 
-# --- 9. Quick smoke test -----------------------------------------------------
-echo "==> Smoke-testing /api/health ..."
-sleep 4  # give the worker a moment to come up
-health=$(curl -sS -o /dev/null -w "%{http_code}" "https://$DOMAIN/api/health" || echo "000")
+# --- 9. Smoke test, with automatic error-log diagnosis on failure -----------
+# A broken WSGI, wrong source_directory/virtualenv, or a missing dependency all
+# surface here as a non-200. Reloads are async and a cold worker can take
+# ~5-10s, so poll instead of a single shot. If it never comes up, pull the PA
+# error log automatically — that's the log that revealed the 2026-06
+# circular-import outage, so surfacing it here turns a silent failure into an
+# actionable one.
+echo "==> Smoke-testing /api/health (polling up to ~45s)..."
+health="000"
+for _ in 1 2 3 4 5 6 7 8 9; do
+  sleep 5
+  health=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "https://$DOMAIN/api/health" || echo "000")
+  if [ "$health" = "200" ]; then break; fi
+done
+
 if [ "$health" = "200" ]; then
-  echo "    OK ($health)"
+  echo "    OK ($health) — bot is live."
 else
-  echo "    /api/health returned $health — check PA's Web tab error log if this persists."
+  echo "ERROR: /api/health returned $health after reload." >&2
+  echo "==> Fetching PA error log to diagnose..." >&2
+  err_log=$(curl -sS -H "$AUTH_HEADER" "$PA_API/files/path/var/log/${DOMAIN}.error.log" 2>/dev/null || true)
+  if [ -n "$err_log" ]; then
+    echo "----- last 25 lines of /var/log/${DOMAIN}.error.log -----" >&2
+    printf '%s\n' "$err_log" | tail -25 >&2
+    echo "----------------------------------------------------------" >&2
+  else
+    echo "    (could not fetch the error log via API — check the PA Web tab.)" >&2
+  fi
+  echo "    Re-running this script heals config/WSGI drift; if a dependency is" >&2
+  echo "    missing, the pip step above installs it." >&2
+  exit 1
 fi
 
 echo
