@@ -1,8 +1,25 @@
-import fcntl
 import hmac
 import os
 import subprocess
 from flask import Flask, request
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows/dev only; PA is Linux
+    # fcntl is Unix-only. Provide a no-op shim so this module imports on
+    # Windows (local dev / test runs). The flock-based deploy concurrency
+    # guard only matters on the Linux PA host; a no-op lock is harmless
+    # off-platform. Tests patch api.index.fcntl.flock directly, so the
+    # attribute must exist and be settable.
+    class _FcntlShim:
+        LOCK_EX = 0
+        LOCK_NB = 0
+        LOCK_UN = 0
+
+        def flock(self, fd, op):  # noqa: D401 - shim
+            pass
+
+    fcntl = _FcntlShim()
 
 app = Flask(__name__)
 

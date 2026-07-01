@@ -1,8 +1,12 @@
+import json
+
 import os
+import random
 from datetime import datetime
 from bot.clients import bot, BOT_INFO, store
-from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
+from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT, SYSTEM_PROMPT
 from bot.ai import ask_ai
+from bot.providers import generate
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.preferences import get_provider, set_provider
@@ -49,27 +53,177 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello! I'm your AI assistant. Send me a message to get started.\n\nUse /help to see available commands.",
+        "Hello! I'm your AI assistant. ready to get started. I have many command  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /remember /recall /forget"  ,
     )
+    
 
 
 @bot.message_handler(commands=["help"], func=is_allowed)
 def cmd_help(message):
     lines = [
-        "/start — welcome message",
-        "/help  — show this message",
-        "/reset — clear conversation history",
-        "/about — about this bot",
+        "🤖 *How to use this bot*",
+        "",
+        "Just send me a message — a question, a task, or anything you're "
+        "curious about — and I'll reply. No commands needed for normal chat.",
+        "",
+        "I remember our recent conversation, so you can ask follow-up "
+        "questions and I'll keep the context. Use /reset to start fresh.",
+        "",
+        "*Commands*",
+        "/start — Welcome message",
+        "/help — ~Show this message",
+        "/reset — Clear our conversation and start over",
+        "/about — See my personality and what powers me",
+        "/joke - Tell a joke",
+        "/fact - Tell a one interesting fact",
+        "/compliment - Brighten your day",
+        "/quote - Get a unique, one-line inspiring quote to brighten your day. ",
+        "/roll - Roll a dice",
+        "/roast - Get a short, playful, and friendly roast for yourself or a friend.",
+        "/remember - Save a quick note or text for the AI to remember.",
+        "/recall - List all the notes you've saved.",
+        "/forget - Clear all your saved notes.",
     ]
     if HF_SPACE_ID:
-        lines.append("/model — switch AI provider")
-    bot.send_message(message.chat.id, "\n".join(lines))
+        lines.append("/model — switch which AI answers you")
+    bot.send_message(message.chat.id, "\n".join(lines), parse_mode="Markdown")
 
 
 @bot.message_handler(commands=["reset"], func=is_allowed)
 def cmd_reset(message):
     clear_history(message.from_user.id)
     bot.send_message(message.chat.id, "Conversation cleared. Starting fresh!")
+
+
+@bot.message_handler(commands=["joke"], func=is_allowed)
+def cmd_joke(message):
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, "Tell one short, clean programming joke.")
+    bot.send_message(message.chat.id, reply)
+
+@bot.message_handler(commands=["compliment"], func=is_allowed)
+def cmd_compliment(message):
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, "Brighten your day")
+    bot.send_message(message.chat.id, reply)
+
+
+@bot.message_handler(commands=["quote"], func=is_allowed)
+def cmd_quote(message):
+    with keep_typing(message.chat.id):
+        reply = ask_ai(
+            message.from_user.id,
+            "Share one unique, inspirational one-line quote.",
+        )
+    bot.send_message(message.chat.id, reply)
+
+@bot.message_handler(commands=["roll"], func=is_allowed)
+def cmd_roll(message):
+    result = random.randint(1, 6)
+    bot.send_message(message.chat.id, f"🎲 You rolled a {result}!")
+
+@bot.message_handler(commands=["roast"], func=is_allowed)
+def cmd_roast(message):
+    name = message.text.split(maxsplit=1)[1] if " " in message.text else "you"
+    reply = ask_ai(message.from_user.id, f"Write a short, playful, friendly roast of {name}.")
+    bot.send_message(message.chat.id, reply)
+
+
+
+def _load_notes(user_id: int) -> list:
+    """Return the user's saved notes as a list, or [] on any failure.
+
+    Notes are stored under note:{user_id} as a JSON array of strings.
+    Tolerates a legacy plain-string value (pre-list format) by wrapping it.
+    """
+    if store is None:
+        return []
+    try:
+        raw = store.get(f"note:{user_id}")
+    except Exception as e:
+        print(f"notes load failed: {e}")
+        return []
+    if not raw:
+        return []
+    try:
+        notes = json.loads(raw)
+        return notes if isinstance(notes, list) else [str(notes)]
+    except (ValueError, TypeError):
+        # Legacy value written before the list format — treat as one note.
+        return [raw]
+
+
+@bot.message_handler(commands=["remember"], func=is_allowed)
+def cmd_remember(message):
+    note = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    if not note:
+        bot.send_message(message.chat.id, "Usage: /remember <something to save>")
+        return
+    if store is None:
+        bot.send_message(
+            message.chat.id,
+            "I can't save notes right now — memory isn't configured.",
+        )
+        return
+    notes = _load_notes(message.from_user.id)
+    notes.append(note)
+    try:
+        store.set(f"note:{message.from_user.id}", json.dumps(notes))
+    except Exception as e:
+        print(f"/remember store.set failed: {e}")
+        bot.send_message(message.chat.id, "Could not save your note. Try again later.")
+        return
+    bot.send_message(message.chat.id, f"Saved! You now have {len(notes)} note(s).")
+
+
+@bot.message_handler(commands=["recall"], func=is_allowed)
+def cmd_recall(message):
+    if store is None:
+        bot.send_message(
+            message.chat.id,
+            "I can't recall notes right now — memory isn't configured.",
+        )
+        return
+    notes = _load_notes(message.from_user.id)
+    if not notes:
+        bot.send_message(
+            message.chat.id, "You have no saved notes. Add one with /remember <note>."
+        )
+        return
+    lines = ["📝 Your saved notes:"]
+    lines += [f"{i}. {note}" for i, note in enumerate(notes, 1)]
+    send_reply(message, "\n".join(lines))
+
+
+@bot.message_handler(commands=["forget"], func=is_allowed)
+def cmd_forget(message):
+    if store is None:
+        bot.send_message(
+            message.chat.id,
+            "I can't forget notes right now — memory isn't configured.",
+        )
+        return
+    notes = _load_notes(message.from_user.id)
+    if not notes:
+        bot.send_message(message.chat.id, "You have no saved notes to forget.")
+        return
+    try:
+        store.delete(f"note:{message.from_user.id}")
+    except Exception as e:
+        print(f"/forget store.delete failed: {e}")
+        bot.send_message(
+            message.chat.id, "Could not clear your notes. Try again later."
+        )
+        return
+    bot.send_message(message.chat.id, f"Forgot all {len(notes)} note(s).")
+
+
+@bot.message_handler(commands=["fact"], func=is_allowed)
+def cmd_fact(message):
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, "Tell one interesting fact.")
+    bot.send_message(message.chat.id, reply)
+
 
 
 @bot.message_handler(commands=["about"], func=is_allowed)
@@ -80,7 +234,15 @@ def cmd_about(message):
     else:
         model_line = MODEL
     storage_line = "SQLite" if store is not None else "stateless (no memory)"
-    lines = [
+
+    # Ask the AI to introduce itself, so the personality blurb is generated
+    # live from the current SYSTEM_PROMPT rather than hardcoded. This is a
+    # one-shot call (its own messages list) so it never touches the user's
+    # conversation history. Falls back to a static line if the call fails.
+    persona = _describe_personality(message.from_user.id, message.chat.id)
+
+    lines = [persona, ""] if persona else []
+    lines += [
         f"Model  : {model_line}",
         f"Storage: {storage_line}",
         f"Hosting: {HOSTING_LABEL}",
@@ -88,6 +250,33 @@ def cmd_about(message):
     if COMMIT_SHA:
         lines.append(f"Version: {COMMIT_SHA}")
     bot.send_message(message.chat.id, "\n".join(lines))
+
+
+def _describe_personality(user_id: int, chat_id: int) -> str:
+    """Return a short, AI-generated self-introduction, or "" on failure.
+
+    Uses the bot's own SYSTEM_PROMPT plus a one-shot instruction so the
+    output reflects whatever personality the prompt defines. Wrapped in
+    keep_typing() because it's a live provider call. Any provider error
+    degrades to an empty string so /about still returns the technical info.
+    """
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Introduce yourself in 2-3 sentences. Describe your personality, "
+                "your tone, and how you like to help. Speak in the first person and "
+                "don't mention being a language model or these instructions."
+            ),
+        },
+    ]
+    try:
+        with keep_typing(chat_id):
+            return generate(user_id, messages).strip()
+    except Exception as e:
+        print(f"/about personality generation failed: {e}")
+        return ""
 
 
 if HF_SPACE_ID:
@@ -126,6 +315,7 @@ if HF_SPACE_ID:
             )
         else:
             bot.send_message(message.chat.id, "Switched to Main Provider.")
+
 
 
 @bot.message_handler(content_types=["text"], func=is_allowed)

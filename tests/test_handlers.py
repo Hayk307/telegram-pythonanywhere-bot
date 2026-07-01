@@ -124,6 +124,7 @@ def test_cmd_about_with_sqlite():
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
+        patch("bot.handlers.generate", return_value="I'm a friendly helper."),
     ):
         from bot.handlers import cmd_about
 
@@ -142,6 +143,7 @@ def test_cmd_about_includes_commit_sha_when_set():
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
         patch("bot.handlers.COMMIT_SHA", "abc1234"),
+        patch("bot.handlers.generate", return_value="I'm a friendly helper."),
     ):
         from bot.handlers import cmd_about
 
@@ -158,6 +160,7 @@ def test_cmd_about_omits_version_line_when_sha_unknown():
         patch("bot.handlers.store", MagicMock()),
         patch("bot.handlers.HF_SPACE_ID", ""),
         patch("bot.handlers.COMMIT_SHA", ""),
+        patch("bot.handlers.generate", return_value="I'm a friendly helper."),
     ):
         from bot.handlers import cmd_about
 
@@ -174,12 +177,51 @@ def test_cmd_about_without_store():
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.store", None),
         patch("bot.handlers.HF_SPACE_ID", ""),
+        patch("bot.handlers.generate", return_value="I'm a friendly helper."),
     ):
         from bot.handlers import cmd_about
 
         cmd_about(make_message())
         sent = mock_bot.send_message.call_args[0][1]
         assert "stateless" in sent
+
+
+def test_cmd_about_includes_ai_personality():
+    """/about asks the AI to introduce itself and shows the blurb above the
+    technical info."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.store", MagicMock()),
+        patch("bot.handlers.HF_SPACE_ID", ""),
+        patch(
+            "bot.handlers.generate", return_value="I'm a witty, concise helper."
+        ) as mock_gen,
+    ):
+        from bot.handlers import cmd_about
+
+        cmd_about(make_message())
+        sent = mock_bot.send_message.call_args[0][1]
+        assert "I'm a witty, concise helper." in sent
+        # personality appears before the technical block
+        assert sent.index("witty") < sent.index("Model")
+        mock_gen.assert_called_once()
+
+
+def test_cmd_about_survives_ai_failure():
+    """If the personality call raises, /about still returns the technical
+    info rather than erroring out."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.store", MagicMock()),
+        patch("bot.handlers.HF_SPACE_ID", ""),
+        patch("bot.handlers.generate", side_effect=Exception("provider down")),
+    ):
+        from bot.handlers import cmd_about
+
+        cmd_about(make_message())
+        sent = mock_bot.send_message.call_args[0][1]
+        assert "Model" in sent
+        assert "SQLite" in sent
 
 
 # ── /model command ────────────────────────────────────────────────────────────
