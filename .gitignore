@@ -8,3 +8,5 @@ __pycache__/
 .webhook_secret
 .vercel/
 bot.db
+bot.db-shm
+bot.db-wal
