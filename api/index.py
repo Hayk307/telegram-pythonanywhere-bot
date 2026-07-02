@@ -11,13 +11,44 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
+# Project root — used by /api/deploy to scope git commands and by
+# /api/health to report the deployed commit. api/index.py is at
+# <repo>/api/index.py, so two dirname() calls give us the repo root.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _commit_sha() -> str:
+    """Short SHA of the checked-out commit, or "" when git is unavailable.
+
+    Computed once at import (= worker boot), so it reflects the code the
+    worker is actually RUNNING — not whatever a later `git pull` left on
+    disk. That makes /api/health the definitive "did the deploy go live?"
+    probe: the reported SHA changes only after a successful worker reload.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", _PROJECT_ROOT, "rev-parse", "--short=7", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return ""
+
+
+_COMMIT_SHA = _commit_sha()
+
 
 @app.route("/api/health")
 @app.route("/api/index")
 def health():
     # Keep this endpoint dependency-free so uptime pings don't trigger
-    # Telegram/store/AI client init.
-    return "OK", 200
+    # Telegram/store/AI client init. Body is "OK <sha>" so one curl
+    # answers both "is it up?" and "which commit is live?".
+    return ("OK " + _COMMIT_SHA).strip(), 200
 
 
 @app.route("/api/webhook", methods=["POST"])
@@ -84,10 +115,6 @@ def webhook():
 # worker boot instead of on every request.
 _WARNED_NO_WEBHOOK_SECRET = [False]
 
-
-# Project root — used by /api/deploy to scope `git pull` correctly.
-# api/index.py is at <repo>/api/index.py, so two dirname() calls give us the repo root.
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Lock file path. fcntl.flock against this file serializes /api/deploy
 # calls so two concurrent GitHub Actions runs can't race `git pull` in
