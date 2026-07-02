@@ -56,7 +56,10 @@ function Import-DotEnv {
         $idx = $line.IndexOf('=')
         if ($idx -lt 1) { continue }
         $key = $line.Substring(0, $idx).Trim()
-        $val = $line.Substring($idx + 1)
+        # Trim the value too: a stray space after '=' (e.g. "TOKEN= abc") would
+        # otherwise be uploaded verbatim into PA's .env and silently break API
+        # calls that don't .strip() their inputs. Mirrors bot/config.py.
+        $val = $line.Substring($idx + 1).Trim()
         # strip one matching pair of surrounding quotes
         if ($val.Length -ge 2 -and (
                 ($val.StartsWith('"') -and $val.EndsWith('"')) -or
@@ -106,7 +109,11 @@ $PaApi               = "https://www.pythonanywhere.com/api/v0/user/$PaUsername"
 $Domain              = "$PaUsername.pythonanywhere.com"
 $ProjectDir          = "/home/$PaUsername/$RepoName"
 $VenvDir             = "/home/$PaUsername/.virtualenvs/telegram-bot"
-$WsgiFile            = "/var/www/${PaUsername}_pythonanywhere_com_wsgi.py"
+# PA's WSGI filename is derived from the LOWERCASED domain. If PA_USERNAME has
+# any uppercase (e.g. "Hayk307"), the served file is still hayk307_..._wsgi.py —
+# writing the mixed-case name creates a second file PA ignores, so the default
+# "Hello, World!" page keeps serving. Always lowercase this path.
+$WsgiFile            = "/var/www/$($PaUsername.ToLower())_pythonanywhere_com_wsgi.py"
 $WebhookUrlResolved  = "https://$Domain/api/webhook"
 $PythonVersion       = 'python313'
 
@@ -132,15 +139,38 @@ function Invoke-Pa {
     $uri = if ($Path -match '^https?://') { $Path } else { "$PaApi$Path" }
     $headers = @{}
     if (-not $NoAuth) { $headers['Authorization'] = "Token $PaToken" }
+    # NB: read the status from the response object's .StatusCode, NOT via
+    # -StatusCodeVariable. That parameter only exists on Invoke-WebRequest in
+    # PowerShell 7.4+, and some 7.x builds ship the 7.0-era cmdlet without it;
+    # using it there throws ParameterBindingException, which the catch below
+    # turns into Code=0 and misreports as "PA API rejected the token".
+    # -SkipHttpErrorCheck (present since 7.0) guarantees a response object even
+    # for 4xx/5xx, so $resp.StatusCode is always populated.
     $p = @{
         Uri = $uri; Method = $Method; Headers = $headers; TimeoutSec = $TimeoutSec
-        SkipHttpErrorCheck = $true; StatusCodeVariable = 'code'
+        SkipHttpErrorCheck = $true
     }
-    if ($Form)              { $p.Form = $Body }
-    elseif ($null -ne $Body) { $p.Body = $Body }
+    if ($Form) {
+        $p.Form = $Body
+    } elseif ($null -ne $Body) {
+        # Encode dictionary bodies as application/x-www-form-urlencoded and set
+        # the Content-Type explicitly. Invoke-WebRequest only auto-adds that
+        # header for POST; for PATCH it sends an empty media type, which PA
+        # rejects with HTTP 415 ("Unsupported media type """). Doing it by hand
+        # keeps every method consistent.
+        if ($Body -is [System.Collections.IDictionary]) {
+            $pairs = foreach ($k in $Body.Keys) {
+                '{0}={1}' -f [uri]::EscapeDataString([string]$k), [uri]::EscapeDataString([string]$Body[$k])
+            }
+            $p.Body = ($pairs -join '&')
+            $p.ContentType = 'application/x-www-form-urlencoded'
+        } else {
+            $p.Body = $Body
+        }
+    }
     try {
         $resp = Invoke-WebRequest @p
-        return [pscustomobject]@{ Code = [int]$code; Body = [string]$resp.Content }
+        return [pscustomobject]@{ Code = [int]$resp.StatusCode; Body = [string]$resp.Content }
     } catch {
         # Network-level failure (DNS, TLS, timeout) — no HTTP status.
         return [pscustomobject]@{ Code = 0; Body = [string]$_.Exception.Message }
