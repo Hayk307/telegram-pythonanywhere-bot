@@ -53,7 +53,7 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello! I'm your AI assistant. ready to get started. I have many commands  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /review /convert /doc /currency /remember /recall /forget "  ,
+        "Hello! I'm your AI assistant. ready to get started. I have many commands  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /review /convert /doc /currency /explain /remember /recall /forget "  ,
     )
     
 
@@ -84,6 +84,7 @@ def cmd_help(message):
         "/convert - Translate code into another language: /convert <language> <code>.",
         "/doc - Add comments to your code: /doc <language> <code>.",
         "/currency - Convert money or crypto: /currency 50$ to amd.",
+        "/explain - Explain a topic or term simply: /explain recursion.",
         "/remember - Save a quick note or text for the AI to remember.",
         "/recall - List all the notes you've saved.",
         "/forget - Clear all your saved notes.",
@@ -233,6 +234,30 @@ def cmd_currency(message):
         "the approximate exchange rate you used. Because you don't have a live "
         "market feed, add a short note that the rate is approximate and may be "
         "out of date. If the request is unclear, ask what they meant."
+    )
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, prompt)
+    send_reply(message, reply)
+
+
+@bot.message_handler(commands=["explain"], func=is_allowed)
+def cmd_explain(message):
+    topic = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    if not topic:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /explain <topic or term>\n\n"
+            "Examples:\n"
+            "/explain recursion\n"
+            "/explain quantum entanglement\n"
+            "/explain how does HTTPS work",
+        )
+        return
+    prompt = (
+        f"Explain '{topic}' in a simple, easy-to-understand way, as if talking "
+        "to a curious beginner with no background in the subject. Use plain "
+        "language, a short everyday analogy if it helps, and keep it concise. "
+        "Avoid jargon; if you must use a technical term, explain it too."
     )
     with keep_typing(message.chat.id):
         reply = ask_ai(message.from_user.id, prompt)
