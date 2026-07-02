@@ -53,7 +53,7 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello! I'm your AI assistant. ready to get started. I have many command  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /remember /recall /forget"  ,
+        "Hello! I'm your AI assistant. ready to get started. I have many commands  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /review /convert /doc /currency /remember /recall /forget "  ,
     )
     
 
@@ -80,6 +80,10 @@ def cmd_help(message):
         "/quote - Get a unique, one-line inspiring quote to brighten your day. ",
         "/roll - Roll a dice",
         "/roast - Get a short, playful, and friendly roast for yourself or a friend.",
+        "/review - Paste code in any language and I'll point out the mistake.",
+        "/convert - Translate code into another language: /convert <language> <code>.",
+        "/doc - Add comments to your code: /doc <language> <code>.",
+        "/currency - Convert money or crypto: /currency 50$ to amd.",
         "/remember - Save a quick note or text for the AI to remember.",
         "/recall - List all the notes you've saved.",
         "/forget - Clear all your saved notes.",
@@ -127,6 +131,112 @@ def cmd_roast(message):
     name = message.text.split(maxsplit=1)[1] if " " in message.text else "you"
     reply = ask_ai(message.from_user.id, f"Write a short, playful, friendly roast of {name}.")
     bot.send_message(message.chat.id, reply)
+
+
+@bot.message_handler(commands=["review"], func=is_allowed)
+def cmd_review(message):
+    code = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    if not code:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /review <paste your code>\n\n"
+            "Send code in any language and I'll tell you what's wrong with it.",
+        )
+        return
+    prompt = (
+        "You are a patient code reviewer for students. The following code may "
+        "contain a bug or mistake. First detect the programming language, then "
+        "point out the mistake(s) clearly and concisely: say what is wrong, why "
+        "it's wrong, and how to fix it. If the code looks correct, say so. Keep "
+        "the explanation short and beginner-friendly.\n\n"
+        f"Code:\n{code}"
+    )
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, prompt)
+    send_reply(message, reply)
+
+
+@bot.message_handler(commands=["convert"], func=is_allowed)
+def cmd_convert(message):
+    args = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    # First word = target language, everything after it = the code to convert.
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /convert <language> <paste your code>\n\n"
+            "Example: /convert python  then your code.\n"
+            "I'll translate the code into the language you asked for.",
+        )
+        return
+    target_language, code = parts[0], parts[1].strip()
+    prompt = (
+        f"Translate the following code into {target_language}. Keep the same "
+        "behavior and logic. Output only the converted code inside a single "
+        "code block, followed by a one-line note about anything that doesn't "
+        "map cleanly to the target language. Detect the source language "
+        "yourself.\n\n"
+        f"Code:\n{code}"
+    )
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, prompt)
+    send_reply(message, reply)
+
+
+@bot.message_handler(commands=["doc"], func=is_allowed)
+def cmd_doc(message):
+    args = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    # First word = language the user specified, everything after it = the code.
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /doc <language> <paste your code>\n\n"
+            "Example: /doc python  then your code.\n"
+            "I'll add explanatory comments using that language's comment syntax.",
+        )
+        return
+    language, code = parts[0], parts[1].strip()
+    prompt = (
+        f"Add clear, beginner-friendly explanatory comments to the following "
+        f"{language} code. Use the correct comment syntax for {language} "
+        "(for example: # in Python, // in JavaScript/C/Java, -- in SQL/Lua, "
+        "# in Ruby/Bash). Do not change the code's logic — only add comments. "
+        "Return the fully commented code inside a single code block.\n\n"
+        f"Code:\n{code}"
+    )
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, prompt)
+    send_reply(message, reply)
+
+
+@bot.message_handler(commands=["currency"], func=is_allowed)
+def cmd_currency(message):
+    request = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    if not request:
+        bot.send_message(
+            message.chat.id,
+            "Usage: /currency <amount and target>\n\n"
+            "Examples:\n"
+            "/currency 50$ to amd\n"
+            "/currency 2 btc to usd\n"
+            "/currency 100 eur to yen",
+        )
+        return
+    # Note: the AI has no live market feed, so rates come from its training
+    # data and may be stale (crypto especially). The prompt asks it to say so.
+    prompt = (
+        "You are a currency and crypto conversion helper. The user wants: "
+        f"'{request}'. Work out the conversion for the given amount, source, "
+        "and target (which may be a fiat currency like USD/EUR/AMD or a crypto "
+        "like BTC/ETH). Reply with the converted amount on the first line, then "
+        "the approximate exchange rate you used. Because you don't have a live "
+        "market feed, add a short note that the rate is approximate and may be "
+        "out of date. If the request is unclear, ask what they meant."
+    )
+    with keep_typing(message.chat.id):
+        reply = ask_ai(message.from_user.id, prompt)
+    send_reply(message, reply)
 
 
 
