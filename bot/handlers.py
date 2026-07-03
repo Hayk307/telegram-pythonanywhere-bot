@@ -55,9 +55,7 @@ def cmd_start(message):
         message.chat.id,
         "👋 Hello! I'm your AI assistant, ready to get started!\n\n"
         "💬 Just send me a message to chat, or try one of my commands — "
-        "type /help to see everything I can do:\n\n"
-        "/help /about /reset /joke /fact /compliment /quote /roll /roast "
-        "/review /convert /doc /currency /explain /remember /recall /forget",
+        "type /help to see everything I can do.",
     )
 
 
