@@ -4,6 +4,9 @@ import os
 import random
 import tempfile
 from datetime import datetime
+
+from pyexpat.errors import messages
+
 from bot.clients import bot, BOT_INFO, store
 from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT, SYSTEM_PROMPT
 from bot.ai import ask_ai
@@ -253,6 +256,7 @@ def cmd_doc(message):
             "Example: /doc python  then your code.\n"
             "I'll add explanatory comments using that language's comment syntax. 💬",
         )
+
         return
     language, code = parts[0], parts[1].strip()
     prompt = (
