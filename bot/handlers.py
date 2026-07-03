@@ -53,9 +53,13 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hello! I'm your AI assistant. ready to get started. I have many commands  /help  /about /start  /reset /joke /fact /compliment /quote /roll /roast /review /convert /doc /currency /explain /remember /recall /forget "  ,
+        "👋 Hello! I'm your AI assistant, ready to get started!\n\n"
+        "💬 Just send me a message to chat, or try one of my commands — "
+        "type /help to see everything I can do:\n\n"
+        "/help /about /reset /joke /fact /compliment /quote /roll /roast "
+        "/review /convert /doc /currency /explain /remember /recall /forget",
     )
-    
+
 
 
 @bot.message_handler(commands=["help"], func=is_allowed)
@@ -64,40 +68,40 @@ def cmd_help(message):
         "🤖 *How to use this bot*",
         "",
         "Just send me a message — a question, a task, or anything you're "
-        "curious about — and I'll reply. No commands needed for normal chat.",
+        "curious about — and I'll reply. 💬 No commands needed for normal chat.",
         "",
-        "I remember our recent conversation, so you can ask follow-up "
+        "🧠 I remember our recent conversation, so you can ask follow-up "
         "questions and I'll keep the context. Use /reset to start fresh.",
         "",
         "*Commands*",
-        "/start — Welcome message",
-        "/help — ~Show this message",
-        "/reset — Clear our conversation and start over",
-        "/about — See my personality and what powers me",
-        "/joke - Tell a joke",
-        "/fact - Tell a one interesting fact",
-        "/compliment - Brighten your day",
-        "/quote - Get a unique, one-line inspiring quote to brighten your day. ",
-        "/roll - Roll a dice",
-        "/roast - Get a short, playful, and friendly roast for yourself or a friend.",
-        "/review - Paste code in any language and I'll point out the mistake.",
-        "/convert - Translate code into another language: /convert <language> <code>.",
-        "/doc - Add comments to your code: /doc <language> <code>.",
-        "/currency - Convert money or crypto: /currency 50$ to amd.",
-        "/explain - Explain a topic or term simply: /explain recursion.",
-        "/remember - Save a quick note or text for the AI to remember.",
-        "/recall - List all the notes you've saved.",
-        "/forget - Clear all your saved notes.",
+        "👋 /start — Welcome message",
+        "❓ /help — Show this message",
+        "🔄 /reset — Clear our conversation and start over",
+        "ℹ️ /about — See my personality and what powers me",
+        "😂 /joke — Tell a joke",
+        "💡 /fact — Tell one interesting fact",
+        "🌟 /compliment — Brighten your day",
+        "📜 /quote — Get a unique, one-line inspiring quote",
+        "🎲 /roll — Roll a dice",
+        "🔥 /roast — Get a short, playful, friendly roast for you or a friend",
+        "🔍 /review — Paste code in any language and I'll point out the mistake",
+        "🔀 /convert — Translate code into another language: /convert <language> <code>",
+        "✍️ /doc — Add comments to your code: /doc <language> <code>",
+        "💱 /currency — Convert money or crypto: /currency 50$ to amd",
+        "🎓 /explain — Explain a topic or term simply: /explain recursion",
+        "📝 /remember — Save a quick note for the AI to remember",
+        "📖 /recall — List all the notes you've saved",
+        "🗑️ /forget — Clear all your saved notes",
     ]
     if HF_SPACE_ID:
-        lines.append("/model — switch which AI answers you")
+        lines.append("🔧 /model — switch which AI answers you")
     bot.send_message(message.chat.id, "\n".join(lines), parse_mode="Markdown")
 
 
 @bot.message_handler(commands=["reset"], func=is_allowed)
 def cmd_reset(message):
     clear_history(message.from_user.id)
-    bot.send_message(message.chat.id, "Conversation cleared. Starting fresh!")
+    bot.send_message(message.chat.id, "🔄 Conversation cleared. Starting fresh! ✨")
 
 
 @bot.message_handler(commands=["joke"], func=is_allowed)
@@ -140,8 +144,8 @@ def cmd_review(message):
     if not code:
         bot.send_message(
             message.chat.id,
-            "Usage: /review <paste your code>\n\n"
-            "Send code in any language and I'll tell you what's wrong with it.",
+            "🔍 Usage: /review <paste your code>\n\n"
+            "Send code in any language and I'll tell you what's wrong with it. 🐛",
         )
         return
     prompt = (
@@ -165,9 +169,9 @@ def cmd_convert(message):
     if len(parts) < 2:
         bot.send_message(
             message.chat.id,
-            "Usage: /convert <language> <paste your code>\n\n"
+            "🔀 Usage: /convert <language> <paste your code>\n\n"
             "Example: /convert python  then your code.\n"
-            "I'll translate the code into the language you asked for.",
+            "I'll translate the code into the language you asked for. 🌐",
         )
         return
     target_language, code = parts[0], parts[1].strip()
@@ -192,9 +196,9 @@ def cmd_doc(message):
     if len(parts) < 2:
         bot.send_message(
             message.chat.id,
-            "Usage: /doc <language> <paste your code>\n\n"
+            "✍️ Usage: /doc <language> <paste your code>\n\n"
             "Example: /doc python  then your code.\n"
-            "I'll add explanatory comments using that language's comment syntax.",
+            "I'll add explanatory comments using that language's comment syntax. 💬",
         )
         return
     language, code = parts[0], parts[1].strip()
@@ -217,11 +221,11 @@ def cmd_currency(message):
     if not request:
         bot.send_message(
             message.chat.id,
-            "Usage: /currency <amount and target>\n\n"
+            "💱 Usage: /currency <amount and target>\n\n"
             "Examples:\n"
-            "/currency 50$ to amd\n"
-            "/currency 2 btc to usd\n"
-            "/currency 100 eur to yen",
+            "💵 /currency 50$ to amd\n"
+            "₿ /currency 2 btc to usd\n"
+            "💶 /currency 100 eur to yen",
         )
         return
     # Note: the AI has no live market feed, so rates come from its training
@@ -246,7 +250,7 @@ def cmd_explain(message):
     if not topic:
         bot.send_message(
             message.chat.id,
-            "Usage: /explain <topic or term>\n\n"
+            "🎓 Usage: /explain <topic or term>\n\n"
             "Examples:\n"
             "/explain recursion\n"
             "/explain quantum entanglement\n"
@@ -292,12 +296,12 @@ def _load_notes(user_id: int) -> list:
 def cmd_remember(message):
     note = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
     if not note:
-        bot.send_message(message.chat.id, "Usage: /remember <something to save>")
+        bot.send_message(message.chat.id, "📝 Usage: /remember <something to save>")
         return
     if store is None:
         bot.send_message(
             message.chat.id,
-            "I can't save notes right now — memory isn't configured.",
+            "⚠️ I can't save notes right now — memory isn't configured.",
         )
         return
     notes = _load_notes(message.from_user.id)
@@ -306,9 +310,9 @@ def cmd_remember(message):
         store.set(f"note:{message.from_user.id}", json.dumps(notes))
     except Exception as e:
         print(f"/remember store.set failed: {e}")
-        bot.send_message(message.chat.id, "Could not save your note. Try again later.")
+        bot.send_message(message.chat.id, "❌ Could not save your note. Try again later.")
         return
-    bot.send_message(message.chat.id, f"Saved! You now have {len(notes)} note(s).")
+    bot.send_message(message.chat.id, f"✅ Saved! You now have {len(notes)} note(s).")
 
 
 @bot.message_handler(commands=["recall"], func=is_allowed)
@@ -316,13 +320,13 @@ def cmd_recall(message):
     if store is None:
         bot.send_message(
             message.chat.id,
-            "I can't recall notes right now — memory isn't configured.",
+            "⚠️ I can't recall notes right now — memory isn't configured.",
         )
         return
     notes = _load_notes(message.from_user.id)
     if not notes:
         bot.send_message(
-            message.chat.id, "You have no saved notes. Add one with /remember <note>."
+            message.chat.id, "📭 You have no saved notes. Add one with /remember <note>."
         )
         return
     lines = ["📝 Your saved notes:"]
@@ -335,22 +339,22 @@ def cmd_forget(message):
     if store is None:
         bot.send_message(
             message.chat.id,
-            "I can't forget notes right now — memory isn't configured.",
+            "⚠️ I can't forget notes right now — memory isn't configured.",
         )
         return
     notes = _load_notes(message.from_user.id)
     if not notes:
-        bot.send_message(message.chat.id, "You have no saved notes to forget.")
+        bot.send_message(message.chat.id, "📭 You have no saved notes to forget.")
         return
     try:
         store.delete(f"note:{message.from_user.id}")
     except Exception as e:
         print(f"/forget store.delete failed: {e}")
         bot.send_message(
-            message.chat.id, "Could not clear your notes. Try again later."
+            message.chat.id, "❌ Could not clear your notes. Try again later."
         )
         return
-    bot.send_message(message.chat.id, f"Forgot all {len(notes)} note(s).")
+    bot.send_message(message.chat.id, f"🗑️ Forgot all {len(notes)} note(s).")
 
 
 @bot.message_handler(commands=["fact"], func=is_allowed)
@@ -378,12 +382,12 @@ def cmd_about(message):
 
     lines = [persona, ""] if persona else []
     lines += [
-        f"Model  : {model_line}",
-        f"Storage: {storage_line}",
-        f"Hosting: {HOSTING_LABEL}",
+        f"🧠 Model: {model_line}",
+        f"💾 Storage: {storage_line}",
+        f"☁️ Hosting: {HOSTING_LABEL}",
     ]
     if COMMIT_SHA:
-        lines.append(f"Version: {COMMIT_SHA}")
+        lines.append(f"🏷️ Version: {COMMIT_SHA}")
     bot.send_message(message.chat.id, "\n".join(lines))
 
 
@@ -423,33 +427,33 @@ if HF_SPACE_ID:
             current = get_provider(message.from_user.id)
             bot.send_message(
                 message.chat.id,
-                f"Current provider: {current}\n\n"
+                f"🤖 Current provider: {current}\n\n"
                 "Options:\n"
-                "/model main — Cerebras (fast, multilingual, with memory)\n"
-                "/model hf — ArmGPT (Armenian only, slow, no memory)",
+                "⚡ /model main — Cerebras (fast, multilingual, with memory)\n"
+                "🇦🇲 /model hf — ArmGPT (Armenian only, slow, no memory)",
             )
             return
         choice = parts[1].strip().lower()
         if choice not in ("main", "hf"):
             bot.send_message(
-                message.chat.id, "Invalid choice. Use: /model main or /model hf"
+                message.chat.id, "❌ Invalid choice. Use: /model main or /model hf"
             )
             return
         if not set_provider(message.from_user.id, choice):
             bot.send_message(
-                message.chat.id, "Could not save preference. Try again later."
+                message.chat.id, "⚠️ Could not save preference. Try again later."
             )
             return
         if choice == "hf":
             bot.send_message(
                 message.chat.id,
-                "Switched to hf (ArmGPT).\n\n"
-                "Note: this is a tiny base completion model trained only on Armenian text. "
+                "🇦🇲 Switched to hf (ArmGPT).\n\n"
+                "ℹ️ Note: this is a tiny base completion model trained only on Armenian text. "
                 "It will continue whatever you write rather than answer questions, "
                 "and it does not understand English. Replies take ~30-60s and there is no memory.",
             )
         else:
-            bot.send_message(message.chat.id, "Switched to Main Provider.")
+            bot.send_message(message.chat.id, "⚡ Switched to Main Provider.")
 
 
 
@@ -464,7 +468,7 @@ def handle_message(message):
         return
     _log(message, "in", text)
     if is_rate_limited(message.from_user.id):
-        limit_msg = f"You've reached the daily limit of {RATE_LIMIT} messages. Try again tomorrow."
+        limit_msg = f"🚫 You've reached the daily limit of {RATE_LIMIT} messages. Try again tomorrow."
         bot.send_message(message.chat.id, limit_msg)
         _log(message, "out", f"[rate limited] {limit_msg}")
         return
@@ -475,5 +479,5 @@ def handle_message(message):
         _log(message, "out", reply)
     except Exception as e:
         print(f"Error in handle_message: {e}")
-        bot.send_message(message.chat.id, "Something went wrong. Please try again.")
+        bot.send_message(message.chat.id, "⚠️ Something went wrong. Please try again.")
         _log(message, "out", f"[error] {e}")
