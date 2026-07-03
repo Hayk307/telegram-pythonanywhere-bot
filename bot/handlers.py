@@ -75,6 +75,7 @@ def cmd_help(message):
         "👋 /start — Welcome message",
         "❓ /help — Show this message",
         "🔄 /reset — Clear our conversation and start over",
+        "🧹 /clear — Delete recent chat messages, keep saved notes (last 48h only)",
         "ℹ️ /about — See my personality and what powers me",
         "#️⃣ /sha — Show the live git commit SHA",
         "😂 /joke — Tell a joke",
@@ -101,6 +102,56 @@ def cmd_help(message):
 def cmd_reset(message):
     clear_history(message.from_user.id)
     bot.send_message(message.chat.id, "🔄 Conversation cleared. Starting fresh! ✨")
+
+
+# /clear walks backwards from its own message id, deleting each message in the
+# private chat (Telegram message ids are sequential per chat). Telegram refuses
+# to delete messages older than 48h — and already-deleted / non-existent ids —
+# which raise, so we stop after a run of consecutive failures (we've reached the
+# un-deletable past) and never scan more than a bounded window regardless.
+CLEAR_SCAN_LIMIT = 100
+CLEAR_MISS_LIMIT = 10
+
+
+@bot.message_handler(commands=["clear"], func=is_allowed)
+def cmd_clear(message):
+    # In a group this would try to delete other people's messages (and needs
+    # admin rights), so only run it in a private chat with the user.
+    if getattr(message.chat, "type", "private") != "private":
+        bot.send_message(
+            message.chat.id, "🧹 /clear only works in a private chat with me."
+        )
+        return
+    chat_id = message.chat.id
+    deleted = 0
+    misses = 0
+    mid = message.message_id
+    for _ in range(CLEAR_SCAN_LIMIT):
+        if mid <= 0:
+            break
+        try:
+            bot.delete_message(chat_id, mid)
+            deleted += 1
+            misses = 0
+        except Exception:
+            # Too old (>48h), already gone, or otherwise not deletable —
+            # expected as we walk into the past. Stop once we've clearly run
+            # past the deletable window.
+            misses += 1
+            if misses >= CLEAR_MISS_LIMIT:
+                break
+        mid -= 1
+    # Reset the AI's conversation memory too, but leave /remember notes alone —
+    # those live under a separate key and are only cleared by /forget.
+    clear_history(message.from_user.id)
+    if deleted:
+        summary = f"🧹 Cleared {deleted} recent message(s) and reset our conversation."
+    else:
+        summary = "🧹 Reset our conversation. (No recent messages I could delete.)"
+    bot.send_message(
+        chat_id,
+        f"{summary} Your saved notes are safe — use /recall to see them.",
+    )
 
 
 @bot.message_handler(commands=["joke"], func=is_allowed)

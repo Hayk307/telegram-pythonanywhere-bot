@@ -249,6 +249,72 @@ def test_cmd_sha_reports_unknown_when_git_sha_unavailable():
         mock_bot.send_message.assert_called_once_with(456, "#️⃣ Live SHA: unknown")
 
 
+# ── /clear ─────────────────────────────────────────────────────────────────────
+
+
+def test_cmd_clear_deletes_and_resets():
+    """In a private chat, /clear deletes recent messages (walking back from its
+    own id) and resets the AI's conversation memory."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.clear_history") as mock_clear,
+    ):
+        from bot.handlers import cmd_clear
+
+        # First few deletes succeed, then Telegram refuses (too old) — the
+        # handler should stop after a run of consecutive failures.
+        mock_bot.delete_message.side_effect = [None, None, None] + [
+            Exception("message can't be deleted")
+        ] * 20
+        msg = make_message(text="/clear")
+        msg.message_id = 100
+        cmd_clear(msg)
+
+        assert mock_bot.delete_message.call_count >= 3
+        # AI memory is reset for this user
+        mock_clear.assert_called_once_with(123)
+        # a confirmation is sent
+        assert mock_bot.send_message.called
+
+
+def test_cmd_clear_preserves_notes():
+    """/clear resets conversation memory via clear_history but must never touch
+    the store directly, so /remember notes (note:{id}) survive."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.clear_history") as mock_clear,
+        patch("bot.handlers.store") as mock_store,
+    ):
+        from bot.handlers import cmd_clear
+
+        mock_bot.delete_message.side_effect = [None] + [Exception("old")] * 20
+        msg = make_message(text="/clear")
+        msg.message_id = 50
+        cmd_clear(msg)
+
+        mock_clear.assert_called_once_with(123)
+        # cmd_clear does no direct store I/O, so saved notes are never deleted
+        mock_store.delete.assert_not_called()
+
+
+def test_cmd_clear_only_in_private_chat():
+    """In a group /clear must not delete anything or reset memory — it would be
+    deleting other people's messages and needs admin rights."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.clear_history") as mock_clear,
+    ):
+        from bot.handlers import cmd_clear
+
+        msg = make_message(text="/clear", chat_type="group")
+        msg.message_id = 100
+        cmd_clear(msg)
+
+        mock_bot.delete_message.assert_not_called()
+        mock_clear.assert_not_called()
+        assert mock_bot.send_message.called  # sent the "private only" notice
+
+
 # ── /model command ────────────────────────────────────────────────────────────
 
 
