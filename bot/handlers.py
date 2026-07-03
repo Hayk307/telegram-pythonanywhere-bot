@@ -78,6 +78,7 @@ def cmd_help(message):
         "❓ /help — Show this message",
         "🔄 /reset — Clear our conversation and start over",
         "ℹ️ /about — See my personality and what powers me",
+        "#️⃣ /sha — Show the live git commit SHA",
         "😂 /joke — Tell a joke",
         "💡 /fact — Tell one interesting fact",
         "🌟 /compliment — Brighten your day",
@@ -416,6 +417,12 @@ def _describe_personality(user_id: int, chat_id: int) -> str:
     except Exception as e:
         print(f"/about personality generation failed: {e}")
         return ""
+
+
+@bot.message_handler(commands=["sha"], func=is_allowed)
+def cmd_sha(message):
+    sha = COMMIT_SHA or "unknown"
+    bot.send_message(message.chat.id, f"#️⃣ Live SHA: {sha}")
 
 
 if HF_SPACE_ID:
