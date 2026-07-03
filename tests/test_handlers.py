@@ -1,4 +1,7 @@
+import os
 from unittest.mock import patch, MagicMock
+
+from bot.fileconvert import ConversionError
 
 
 def make_message(text="hello", user_id=123, chat_id=456, chat_type="private"):
@@ -434,3 +437,112 @@ def test_handle_message_uses_keep_typing():
         msg = make_message()
         handle_message(msg)
         mock_keep.assert_called_once_with(456)
+
+
+# ── /convertfile ────────────────────────────────────────────────────────────
+
+
+def make_file_message(
+    content_type="document",
+    file_name="clip.mp4",
+    file_size=1000,
+    caption="mp3",
+    user_id=123,
+    chat_id=456,
+):
+    msg = MagicMock()
+    msg.content_type = content_type
+    msg.caption = caption
+    msg.from_user.id = user_id
+    msg.chat.id = chat_id
+    doc = MagicMock()
+    doc.file_id = "FILEID"
+    doc.file_name = file_name
+    doc.file_size = file_size
+    msg.document = doc
+    return msg
+
+
+def test_cmd_convertfile_shows_instructions():
+    with patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import cmd_convertfile
+
+        cmd_convertfile(make_message(text="/convertfile"))
+        assert "caption" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_handle_file_without_caption_prompts():
+    with patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import handle_file
+
+        handle_file(make_file_message(caption=None))
+        mock_bot.get_file.assert_not_called()
+        assert "caption" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_handle_file_unsupported_target():
+    with patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import handle_file
+
+        handle_file(make_file_message(caption="exe"))
+        mock_bot.get_file.assert_not_called()
+        assert "can't produce" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_handle_file_too_big():
+    with patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import handle_file
+
+        handle_file(make_file_message(caption="mp3", file_size=999_999_999))
+        mock_bot.get_file.assert_not_called()
+        assert "too big" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_handle_file_happy_path_sends_document():
+    def fake_convert(in_path, source_ext, target):
+        out = os.path.splitext(in_path)[0] + "." + target
+        with open(out, "wb") as f:
+            f.write(b"converted-bytes")
+        return out
+
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.fileconvert.convert", side_effect=fake_convert),
+        patch("bot.handlers.keep_typing") as mock_keep,
+    ):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
+        mock_bot.get_file.return_value = MagicMock(file_path="path/on/tg")
+        mock_bot.download_file.return_value = b"input-bytes"
+
+        from bot.handlers import handle_file
+
+        handle_file(make_file_message(file_name="clip.mp4", caption="mp3"))
+
+        mock_bot.get_file.assert_called_once_with("FILEID")
+        mock_bot.download_file.assert_called_once()
+        assert mock_bot.send_document.called
+        assert mock_bot.send_document.call_args.kwargs["visible_file_name"].endswith(
+            ".mp3"
+        )
+
+
+def test_handle_file_conversion_error_is_reported():
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch(
+            "bot.handlers.fileconvert.convert",
+            side_effect=ConversionError("can't convert that"),
+        ),
+        patch("bot.handlers.keep_typing") as mock_keep,
+    ):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
+        mock_bot.get_file.return_value = MagicMock(file_path="p")
+        mock_bot.download_file.return_value = b"data"
+
+        from bot.handlers import handle_file
+
+        handle_file(make_file_message(caption="mp3"))
+        mock_bot.send_document.assert_not_called()
+        assert "can't convert that" in mock_bot.send_message.call_args[0][1]

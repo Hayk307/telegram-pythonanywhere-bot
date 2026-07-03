@@ -30,13 +30,15 @@ telegram-pythonanywhere-bot/
 │   ├── rate_limit.py     # Per-user daily message rate limiting via store (graceful degradation)
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries (graceful degradation)
 │   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
-│   └── handlers.py       # All Telegram command and message handlers — add new commands here
+│   ├── handlers.py       # All Telegram command and message handlers — add new commands here
+│   └── fileconvert.py    # /convertfile engine — image (Pillow) / media (ffmpeg) / doc (text-only); heavy libs imported lazily
 ├── tests/
 │   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, flask)
 │   ├── test_ai.py        # ask_ai() orchestration
 │   ├── test_providers.py # _call_main() retry, _call_hf() prompt handling, generate() dispatch
 │   ├── test_preferences.py
 │   ├── test_handlers.py
+│   ├── test_fileconvert.py # /convertfile engine: parsing, family routing, real image/doc/media conversions
 │   ├── test_helpers.py
 │   ├── test_history.py
 │   ├── test_rate_limit.py
@@ -175,6 +177,26 @@ The bot's storage layer is a thin KV-with-TTL abstraction in `bot/store.py` expo
 
 - **AI retry logic:** `_call_main()` in `bot/providers.py` retries up to 3 attempts (`AI_RETRIES=2` extra retries) with exponential backoff (1s, 2s) before raising. Handles transient network errors and rate-limit spikes. HF is not retried (it's too slow — a retry would blow the per-request budget).
 - **Typing indicator during slow calls:** `keep_typing()` in `bot/helpers.py` spawns a daemon thread that re-sends `send_chat_action(chat_id, "typing")` every 4 seconds (Telegram's typing action expires after ~5s). On context exit the thread is signalled and joined with a 2s timeout so the request shuts down cleanly. Proxy 503s from PA's outbound proxy are caught and logged; the thread keeps looping.
+
+---
+
+## File conversion (`/convertfile`)
+
+`/convertfile` lets a user send a file with the desired output format as the **caption** (e.g. attach a video, caption `mp3`). `cmd_convertfile` prints usage; the content-type handler `handle_file` (registered for `document/audio/video/voice/photo`) does the work: parse target format → size-check (≤20 MB, the Bot API download cap) → download via `get_file`/`download_file` → convert inside a `TemporaryDirectory` → return the result via `send_document`.
+
+The engine lives in `bot/fileconvert.py` and converts **within a family** only:
+
+- **image ↔ image** (png/jpg/webp/bmp/gif/tiff) via **Pillow**
+- **media ↔ media** (audio + video are one family, so mp4→mp3 works) via **ffmpeg**
+- **doc ↔ doc** (pdf/docx/txt/md → pdf/docx/txt) — **text only**: extract text, then re-emit. Layout, images, and fonts are lost. PDF output uses fpdf2's Latin-1 core font, so non-Latin text (e.g. Armenian) is replaced with `?` unless a Unicode TTF is bundled via `add_font()`.
+
+Cross-family requests (e.g. `pdf`→`mp3`) raise `ConversionError` with a clear message. `convert()` validates family / target / source **before** importing any heavy lib, so those checks are testable without the optional deps installed.
+
+**Crash-safety:** Pillow / pypdf / python-docx / fpdf / ffmpeg are imported **lazily inside** the conversion functions, never at module top level. `bot/fileconvert.py` imports only stdlib at import time, so `bot.handlers` (which does `from bot import fileconvert`) still boots and every other command keeps working even if the conversion deps aren't installed — a conversion attempt just replies "not available (missing X)".
+
+**ffmpeg via pip:** the media path uses `imageio_ffmpeg.get_ffmpeg_exe()` (a static ffmpeg binary shipped inside the pip wheel), falling back to `ffmpeg` on PATH. This avoids depending on a system ffmpeg or adding an entry to PA's outbound whitelist. `subprocess.run([...])` is always called with a list (never `shell=True`) and a `FFMPEG_TIMEOUT` so a pathological file can't wedge the worker.
+
+**Deploy note:** these deps are in `requirements.txt`, but `/api/deploy` only runs `git pull` + touch — it does **not** `pip install`. After pulling this on PA, run `pip install -r requirements.txt` in the virtualenv and reload the web app, or `/convertfile` will report the libraries as missing.
 
 ---
 

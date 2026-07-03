@@ -2,6 +2,7 @@ import json
 
 import os
 import random
+import tempfile
 from datetime import datetime
 from bot.clients import bot, BOT_INFO, store
 from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT, SYSTEM_PROMPT
@@ -11,6 +12,7 @@ from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
+from bot import fileconvert
 
 # Verbose console logging for local dev and teaching. Enabled by
 # BOT_VERBOSE_LOG=1 (run_local.py sets this automatically). Prints one
@@ -86,6 +88,7 @@ def cmd_help(message):
         "🔥 /roast — Get a short, playful, friendly roast for you or a friend",
         "🔍 /review — Paste code in any language and I'll point out the mistake",
         "🔀 /convert — Translate code into another language: /convert <language> <code>",
+        "📎 /convertfile — Convert a file (image/audio/video/doc); send it with the target format as the caption",
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
@@ -511,6 +514,102 @@ if HF_SPACE_ID:
         else:
             bot.send_message(message.chat.id, "⚡ Switched to Main Provider.")
 
+
+
+FILE_CONTENT_TYPES = ["document", "audio", "video", "voice", "photo"]
+# Telegram bots can only download files up to 20 MB via getFile.
+MAX_CONVERT_BYTES = 20 * 1024 * 1024
+
+
+@bot.message_handler(commands=["convertfile"], func=is_allowed)
+def cmd_convertfile(message):
+    bot.send_message(
+        message.chat.id,
+        "📎 *Convert a file*\n\n"
+        "Send me a file — document, image, audio, or video — and put the "
+        "format you want as the *caption*.\n\n"
+        "Examples (write this as the file's caption):\n"
+        "🎬 `mp3` — pull the audio out of a video\n"
+        "🖼️ `png` — convert an image (jpg/png/webp/gif…)\n"
+        "📄 `pdf` — convert a text or Word doc (text only)\n\n"
+        "I convert *within a family*: image↔image, audio/video↔audio/video, "
+        "document↔document — so things like PDF→MP3 aren't possible. Max 20 MB.",
+        parse_mode="Markdown",
+    )
+
+
+def _incoming_file(message):
+    """Return (file_id, file_name, file_size) for whichever kind of file the
+    message carries, or (None, None, None) if there isn't one."""
+    if message.content_type == "document" and message.document:
+        d = message.document
+        return d.file_id, d.file_name, d.file_size
+    if message.content_type == "photo" and message.photo:
+        # photo is a list of sizes; the last one is the largest.
+        p = message.photo[-1]
+        return p.file_id, "image.jpg", getattr(p, "file_size", None)
+    if message.content_type == "audio" and message.audio:
+        a = message.audio
+        return a.file_id, a.file_name or "audio.mp3", a.file_size
+    if message.content_type == "video" and message.video:
+        v = message.video
+        return v.file_id, getattr(v, "file_name", None) or "video.mp4", v.file_size
+    if message.content_type == "voice" and message.voice:
+        vo = message.voice
+        return vo.file_id, "voice.ogg", vo.file_size
+    return None, None, None
+
+
+@bot.message_handler(content_types=FILE_CONTENT_TYPES, func=is_allowed)
+def handle_file(message):
+    file_id, file_name, file_size = _incoming_file(message)
+    if file_id is None:
+        return
+    target = fileconvert.parse_target_format(message.caption)
+    if not target:
+        bot.send_message(
+            message.chat.id,
+            "📎 Add the format you want as the file's caption, e.g. `mp3` or "
+            "`pdf`. See /convertfile for details.",
+            parse_mode="Markdown",
+        )
+        return
+    if target not in fileconvert.SUPPORTED_TARGETS:
+        bot.send_message(
+            message.chat.id,
+            f"❌ I can't produce .{target} files. I support images "
+            "(png/jpg/webp/gif…), audio/video (mp3/mp4/wav…), and documents "
+            "(pdf/docx/txt).",
+        )
+        return
+    if file_size and file_size > MAX_CONVERT_BYTES:
+        bot.send_message(
+            message.chat.id, "❌ That file is too big — I can only handle up to 20 MB."
+        )
+        return
+    source_ext = fileconvert.normalize_ext(file_name)
+    try:
+        with keep_typing(message.chat.id):
+            info = bot.get_file(file_id)
+            data = bot.download_file(info.file_path)
+            with tempfile.TemporaryDirectory() as tmp:
+                in_path = os.path.join(tmp, f"input.{source_ext or 'bin'}")
+                with open(in_path, "wb") as handle:
+                    handle.write(data)
+                out_path = fileconvert.convert(in_path, source_ext, target)
+                stem = os.path.splitext(file_name or "converted")[0] or "converted"
+                out_name = f"{stem}.{target}"
+                with open(out_path, "rb") as result:
+                    bot.send_document(
+                        message.chat.id, result, visible_file_name=out_name
+                    )
+    except fileconvert.ConversionError as e:
+        bot.send_message(message.chat.id, f"❌ {e}")
+    except Exception as e:
+        print(f"/convertfile failed: {e}")
+        bot.send_message(
+            message.chat.id, "❌ Something went wrong converting that file."
+        )
 
 
 @bot.message_handler(content_types=["text"], func=is_allowed)

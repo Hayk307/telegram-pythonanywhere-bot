@@ -451,6 +451,16 @@ make deploy-pa  # one-command PythonAnywhere deploy (see "Fast path" in Part 2)
 | `/about` | Show model, storage, and hosting info |
 | `/sha` | Show the live git commit SHA |
 | `/model` | Switch AI provider (only available when `HF_SPACE_ID` is set) |
+| `/convertfile` | Convert an uploaded file to another format — send the file with the target format as its caption |
+
+**File conversion** (`/convertfile`) needs extra libraries, so after pulling this
+update on PythonAnywhere run `pip install -r requirements.txt` in your virtualenv
+and reload the web app (the auto-deploy only does `git pull`, not `pip install`).
+It converts **within a family** — image↔image, audio/video↔audio/video (e.g.
+MP4→MP3), document↔document — up to 20 MB. Document conversions are **text-only**
+(layout and images are dropped), and cross-family conversion (e.g. PDF→MP3) is
+impossible. `ffmpeg` ships bundled via `imageio-ffmpeg`, so no system install is
+needed.
 
 ---
 

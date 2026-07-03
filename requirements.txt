@@ -4,3 +4,13 @@ openai==2.30.0
 requests==2.33.1
 gradio-client==1.7.0
 pytest==9.0.2
+
+# File conversion for /convertfile. Imported lazily in bot/fileconvert.py so the
+# bot still boots if these aren't installed yet (a conversion just fails with a
+# clear message). imageio-ffmpeg bundles a static ffmpeg binary, so audio/video
+# conversion needs no system ffmpeg and no extra PA outbound-whitelist entry.
+Pillow==12.3.0
+pypdf==6.14.2
+python-docx==1.2.0
+fpdf2==2.8.7
+imageio-ffmpeg==0.6.0
