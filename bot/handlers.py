@@ -358,10 +358,15 @@ WIKI_USER_AGENT = "telegram-pythonanywhere-bot/1.0 (educational Telegram bot)"
 
 
 def _classify_image_request(user_id: int, prompt: str):
-    """Ask the AI whether `prompt` names a real subject or a creative brief.
+    """Ask the AI whether `prompt` is a plain depiction of a real subject or a
+    creative brief.
 
-    Returns (is_real, subject): is_real True when the prompt refers to an
-    identifiable real person/place/thing with actual photos, and subject the
+    Returns (is_real, subject): is_real True ONLY when the prompt asks for a
+    real, identifiable subject exactly as it actually exists (a portrait/photo
+    of a person, place, or object), so a real photo can be retrieved. A
+    scenario, action, or counterfactual — even one naming real people/things
+    ("a Real Madrid player playing for Barcelona") — is a creative brief and
+    returns is_real False so the image is generated instead. `subject` is the
     canonical name to look up on Wikipedia. Any AI/parse failure returns
     (False, prompt) so we simply fall back to generating the image.
     """
@@ -373,15 +378,25 @@ def _classify_image_request(user_id: int, prompt: str):
         {
             "role": "user",
             "content": (
-                "Decide whether this image request refers to a REAL, "
-                "identifiable person, place, organization, or specific "
-                "real-world object that has actual photographs (e.g. 'Albert "
-                "Einstein', 'Eiffel Tower', 'the Toyota Corolla'), versus an "
-                "IMAGINARY or artistic scene to be created (e.g. 'a dragon on "
-                "a skateboard', 'watercolor mountains at sunrise'). Reply with "
-                'ONLY a compact JSON object: {"real": true|false, "subject": '
-                '"<the real subject\'s common name, or empty string if not '
-                'real>"}. No other text.\n\n'
+                "An image bot must decide whether to RETRIEVE a real photograph "
+                "or GENERATE a new image for this request.\n\n"
+                "Set real=true ONLY when the request is a plain depiction of a "
+                "single real, identifiable subject exactly as it actually "
+                "exists — essentially a portrait or photo of that subject with "
+                "no invented action, setting, or alteration. Examples: 'Albert "
+                "Einstein', 'the Eiffel Tower', 'a photo of the Toyota "
+                "Corolla'.\n\n"
+                "Set real=false when the request describes a SCENE, ACTION, "
+                "HYPOTHETICAL, or COMBINATION that would not exist as an actual "
+                "photograph — even if it names real people, places, or things. "
+                "Examples: 'a Real Madrid player playing for Barcelona' (a "
+                "situation that isn't real), 'Einstein riding a skateboard', "
+                "'the Eiffel Tower on the moon', 'a dragon on a skateboard', "
+                "'watercolor mountains at sunrise'. When unsure, prefer "
+                "real=false (generate).\n\n"
+                'Reply with ONLY a compact JSON object: {"real": true|false, '
+                '"subject": "<if real, the subject\'s common name to search; '
+                'otherwise an empty string>"}. No other text.\n\n'
                 f"Request: {prompt}"
             ),
         },
