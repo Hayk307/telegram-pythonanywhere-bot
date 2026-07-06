@@ -736,6 +736,80 @@ def test_fetch_real_photo_rejects_svg():
     img.content = b"<svg/>"
     with patch("bot.handlers.requests") as mock_requests:
         mock_requests.get.side_effect = [meta, img]
+        from bot.handlers import _wikipedia_image
+
+        assert _wikipedia_image("some flag") is None
+
+
+def test_search_web_image_disabled_without_keys():
+    """With no Google credentials the web search is a no-op (returns None,
+    never touches the network) so the bot works key-free."""
+    with (
+        patch("bot.handlers.GOOGLE_API_KEY", ""),
+        patch("bot.handlers.GOOGLE_CSE_ID", ""),
+        patch("bot.handlers.requests") as mock_requests,
+    ):
+        from bot.handlers import _search_web_image
+
+        assert _search_web_image("Eiffel Tower") is None
+        mock_requests.get.assert_not_called()
+
+
+def test_search_web_image_returns_bytes():
+    """When configured, it queries CSE and downloads the top image result."""
+    search = MagicMock()
+    search.raise_for_status = MagicMock()
+    search.json.return_value = {"items": [{"link": "https://cdn.example/x.jpg"}]}
+    img = MagicMock()
+    img.raise_for_status = MagicMock()
+    img.headers = {"Content-Type": "image/jpeg"}
+    img.content = b"\xff\xd8web-photo"
+    with (
+        patch("bot.handlers.GOOGLE_API_KEY", "key"),
+        patch("bot.handlers.GOOGLE_CSE_ID", "cx"),
+        patch("bot.handlers.requests") as mock_requests,
+    ):
+        mock_requests.get.side_effect = [search, img]
+        from bot.handlers import _search_web_image
+
+        assert _search_web_image("Eiffel Tower") == b"\xff\xd8web-photo"
+        # first call is the search endpoint
+        assert "customsearch" in mock_requests.get.call_args_list[0][0][0]
+
+
+def test_search_web_image_no_results_returns_none():
+    search = MagicMock()
+    search.raise_for_status = MagicMock()
+    search.json.return_value = {"items": []}
+    with (
+        patch("bot.handlers.GOOGLE_API_KEY", "key"),
+        patch("bot.handlers.GOOGLE_CSE_ID", "cx"),
+        patch("bot.handlers.requests") as mock_requests,
+    ):
+        mock_requests.get.return_value = search
+        from bot.handlers import _search_web_image
+
+        assert _search_web_image("nonexistent thing") is None
+
+
+def test_fetch_real_photo_prefers_web_over_wikipedia():
+    """Web search wins when it returns a photo — Wikipedia isn't consulted."""
+    with (
+        patch("bot.handlers._search_web_image", return_value=b"\xff\xd8web"),
+        patch("bot.handlers._wikipedia_image") as mock_wiki,
+    ):
         from bot.handlers import _fetch_real_photo
 
-        assert _fetch_real_photo("some flag") is None
+        assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8web"
+        mock_wiki.assert_not_called()
+
+
+def test_fetch_real_photo_falls_back_to_wikipedia():
+    """When web search yields nothing, Wikipedia is the fallback source."""
+    with (
+        patch("bot.handlers._search_web_image", return_value=None),
+        patch("bot.handlers._wikipedia_image", return_value=b"\xff\xd8wiki"),
+    ):
+        from bot.handlers import _fetch_real_photo
+
+        assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8wiki"

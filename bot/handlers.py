@@ -11,7 +11,16 @@ import requests
 from pyexpat.errors import messages
 
 from bot.clients import bot, BOT_INFO, store
-from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT, SYSTEM_PROMPT
+from bot.config import (
+    COMMIT_SHA,
+    GOOGLE_API_KEY,
+    GOOGLE_CSE_ID,
+    HF_SPACE_ID,
+    HOSTING_LABEL,
+    MODEL,
+    RATE_LIMIT,
+    SYSTEM_PROMPT,
+)
 from bot.ai import ask_ai
 from bot.providers import generate
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
@@ -332,28 +341,37 @@ def cmd_explain(message):
 
 # /image — smart image command. It first asks the AI to classify the request:
 #   • REAL subject (an identifiable person, place, or thing that has actual
-#     photographs — "Albert Einstein", "Eiffel Tower") → fetch a real photo
-#     from Wikipedia and send that.
+#     photographs — "Albert Einstein", "Eiffel Tower") → retrieve a real photo
+#     from the internet and send that.
 #   • CREATIVE brief (something imaginary to be made — "a dragon on a
 #     skateboard", "watercolor mountains") → GENERATE it with Pollinations
 #     (image.pollinations.ai), a free, no-API-key text-to-image service.
-# Every step degrades gracefully: a failed classification, a missing Wikipedia
-# photo, or an SVG/oversized result all fall through to generation, and a
-# failed generation ends in a friendly error rather than an exception.
 #
-# NOTE for PythonAnywhere: none of image.pollinations.ai, en.wikipedia.org, or
-# upload.wikimedia.org are on the free-tier outbound whitelist by default —
-# request them on the PA forum, or /image will time out in production while
-# still working locally.
+# Real-photo retrieval tries, in order: (1) a general web image search via
+# Google Programmable Search when GOOGLE_API_KEY + GOOGLE_CSE_ID are set —
+# broad coverage of arbitrary real subjects; (2) Wikipedia's lead image — no
+# key needed, great for famous subjects. If neither finds a usable photo we
+# fall through to generation. Every step degrades gracefully: a failed
+# classification, a missing photo, or an SVG/non-raster result all fall through
+# to generation, and a failed generation ends in a friendly error rather than
+# an exception.
+#
+# NOTE for PythonAnywhere: none of image.pollinations.ai, en.wikipedia.org,
+# upload.wikimedia.org, or www.googleapis.com (web search) are on the free-tier
+# outbound whitelist by default — request them on the PA forum, or /image will
+# time out in production while still working locally.
 POLLINATIONS_ENDPOINT = "https://image.pollinations.ai/prompt/"
 WIKI_API = "https://en.wikipedia.org/w/api.php"
+GOOGLE_SEARCH_API = "https://www.googleapis.com/customsearch/v1"
 IMAGE_TIMEOUT = 90  # seconds — Pollinations can be slow under load
 WIKI_TIMEOUT = 15  # seconds — Wikipedia is fast; fail over to generation quickly
+SEARCH_TIMEOUT = 15  # seconds — web image search + download
 IMAGE_WIDTH = 1024
 IMAGE_HEIGHT = 1024
 # Telegram caps photo captions at 1024 chars; keep well under it.
 IMAGE_CAPTION_LIMIT = 900
-# Wikipedia's API etiquette asks for a descriptive User-Agent.
+# Wikipedia's API etiquette asks for a descriptive User-Agent; reused for all
+# outbound image fetches so hosts that block empty agents still serve us.
 WIKI_USER_AGENT = "telegram-pythonanywhere-bot/1.0 (educational Telegram bot)"
 
 
@@ -416,18 +434,77 @@ def _classify_image_request(user_id: int, prompt: str):
         return False, prompt
 
 
-def _fetch_real_photo(subject: str):
-    """Return real-photo bytes for `subject` via Wikipedia, or None.
+def _download_image(url: str):
+    """Download `url` and return its bytes if it's a raster image Telegram can
+    send as a photo, else None.
+
+    Rejects non-images and SVG (logos/flags), which send_photo can't render.
+    Any network/HTTP error returns None so callers fall through to the next
+    source rather than raising.
+    """
+    try:
+        resp = requests.get(
+            url, headers={"User-Agent": WIKI_USER_AGENT}, timeout=SEARCH_TIMEOUT
+        )
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "")
+        if not ctype.startswith("image/") or "svg" in ctype or not resp.content:
+            return None
+        return resp.content
+    except Exception as e:
+        print(f"/image download failed for {url!r}: {e}")
+        return None
+
+
+def _search_web_image(subject: str):
+    """Return real-photo bytes for `subject` from a general web image search
+    via Google Programmable Search, or None.
+
+    Disabled (returns None immediately) unless both GOOGLE_API_KEY and
+    GOOGLE_CSE_ID are configured, so the bot keeps working with no key. Asks
+    for image results, then downloads the top hit; on no result / bad key /
+    network error returns None so the caller falls back to Wikipedia.
+    """
+    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID and subject):
+        return None
+    try:
+        params = {
+            "key": GOOGLE_API_KEY,
+            "cx": GOOGLE_CSE_ID,
+            "q": subject,
+            "searchType": "image",
+            "num": 1,
+            "safe": "active",
+            # Prefer large, photographic results over clip art / icons.
+            "imgSize": "large",
+            "imgType": "photo",
+        }
+        resp = requests.get(
+            GOOGLE_SEARCH_API,
+            params=params,
+            headers={"User-Agent": WIKI_USER_AGENT},
+            timeout=SEARCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items") or []
+        if not items:
+            return None
+        return _download_image(items[0].get("link", ""))
+    except Exception as e:
+        print(f"/image web search failed: {e}")
+        return None
+
+
+def _wikipedia_image(subject: str):
+    """Return real-photo bytes for `subject` via Wikipedia's lead image, or None.
 
     Uses the MediaWiki pageimages API (generator=search picks the best-
     matching page) to resolve a lead image, prefers the size-bounded
     thumbnail over the full original, then downloads it. Returns None — so
-    the caller falls back to generation — when nothing suitable is found or
-    the result isn't a raster image Telegram can display (e.g. SVG logos).
+    the caller falls back to generation — when nothing suitable is found.
     """
     if not subject:
         return None
-    headers = {"User-Agent": WIKI_USER_AGENT}
     try:
         params = {
             "action": "query",
@@ -440,7 +517,10 @@ def _fetch_real_photo(subject: str):
             "pithumbsize": IMAGE_WIDTH,
         }
         meta = requests.get(
-            WIKI_API, params=params, headers=headers, timeout=WIKI_TIMEOUT
+            WIKI_API,
+            params=params,
+            headers={"User-Agent": WIKI_USER_AGENT},
+            timeout=WIKI_TIMEOUT,
         )
         meta.raise_for_status()
         pages = (meta.json().get("query") or {}).get("pages") or {}
@@ -454,16 +534,20 @@ def _fetch_real_photo(subject: str):
                 break
         if not image_url:
             return None
-        img = requests.get(image_url, headers=headers, timeout=WIKI_TIMEOUT)
-        img.raise_for_status()
-        ctype = img.headers.get("Content-Type", "")
-        # send_photo needs a raster image; SVG (logos, flags) would be rejected.
-        if not ctype.startswith("image/") or "svg" in ctype or not img.content:
-            return None
-        return img.content
+        return _download_image(image_url)
     except Exception as e:
-        print(f"/image real-photo lookup failed: {e}")
+        print(f"/image Wikipedia lookup failed: {e}")
         return None
+
+
+def _fetch_real_photo(subject: str):
+    """Return real-photo bytes for `subject`, trying the broadest source first.
+
+    Order: general web image search (Google Programmable Search, when
+    configured) → Wikipedia lead image. Returns None if neither yields a
+    usable photo, so the caller generates the image instead.
+    """
+    return _search_web_image(subject) or _wikipedia_image(subject)
 
 
 def _generate_image(prompt: str):

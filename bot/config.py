@@ -84,6 +84,17 @@ AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1").strip()
 MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
 
+# Optional web image search (Google Programmable Search) for the /image
+# command's "real photo" path. When BOTH are set, /image searches the web for
+# a real photo first and only falls back to Wikipedia / generation otherwise.
+# When unset, /image uses Wikipedia as before. Get an API key at
+# https://developers.google.com/custom-search/v1/introduction and a search
+# engine id (cx) at https://programmablesearchengine.google.com/ (turn on
+# "Image search" and "Search the entire web"). Free tier: 100 queries/day.
+# On PA, add www.googleapis.com to the outbound whitelist.
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
+GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "").strip()
+
 # Hugging Face provider (optional) — when set, users can switch via /model
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()  # optional, for private spaces

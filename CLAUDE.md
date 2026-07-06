@@ -86,6 +86,8 @@ telegram-pythonanywhere-bot/
 | `AI_BASE_URL` | No | `https://api.cerebras.ai/v1` | Any OpenAI-compatible base URL |
 | `AI_MODEL` | No | `gpt-oss-120b` | Model name for the provider |
 | `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables `/model` command when set |
+| `GOOGLE_API_KEY` | No | — | Google Programmable Search API key. Set together with `GOOGLE_CSE_ID` to enable the web image-search source for `/image`'s real-photo path (searched before Wikipedia). Free tier: 100 queries/day. Requires `www.googleapis.com` on the PA outbound whitelist |
+| `GOOGLE_CSE_ID` | No | — | Google Programmable Search engine id (`cx`). Create at programmablesearchengine.google.com with "Image search" + "Search the entire web" enabled. Only used when `GOOGLE_API_KEY` is also set |
 | `HF_TOKEN` | No | — | HF auth token — only needed if the Gradio space is private or gated |
 | `WEBHOOK_SECRET` | No | _auto-generated_ | Random string Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`. Auto-bootstrapped on first run: if the env var is unset, `bot/config.py::_bootstrap_webhook_secret()` generates a 64-hex secret, persists it to `.webhook_secret` (gitignored, mode 0600), and reuses it on subsequent boots. The boot-time `register_webhook()` then ships it to Telegram. Set the env var to override / share across envs |
 | `WEBHOOK_URL` | No | — | When set, the bot auto-registers this URL as the Telegram webhook on every worker boot and after every `/api/deploy`. No manual `setWebhook` step needed. Idempotent. On PA, value is `https://<your-pa-username>.pythonanywhere.com/api/webhook`. Leave unset for local polling |
