@@ -546,3 +546,82 @@ def test_handle_file_conversion_error_is_reported():
         handle_file(make_file_message(caption="mp3"))
         mock_bot.send_document.assert_not_called()
         assert "can't convert that" in mock_bot.send_message.call_args[0][1]
+
+
+# ── /vortex (image generation) ──────────────────────────────────────────────
+
+
+def test_cmd_vortex_no_prompt_shows_usage():
+    """/vortex with no description shows usage and never hits the network."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.requests") as mock_requests,
+    ):
+        from bot.handlers import cmd_vortex
+
+        cmd_vortex(make_message(text="/vortex"))
+        mock_requests.get.assert_not_called()
+        assert "Usage" in mock_bot.send_message.call_args[0][1]
+
+
+def test_cmd_vortex_happy_path_sends_photo():
+    """A valid prompt fetches the image and sends the raw bytes via send_photo."""
+    resp = MagicMock()
+    resp.headers = {"Content-Type": "image/jpeg"}
+    resp.content = b"\xff\xd8fake-jpeg-bytes"
+    resp.raise_for_status = MagicMock()
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.requests") as mock_requests,
+        patch("bot.handlers.keep_typing") as mock_keep,
+    ):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
+        mock_requests.get.return_value = resp
+        from bot.handlers import cmd_vortex
+
+        cmd_vortex(make_message(text="/vortex a red fox in snow"))
+
+        # prompt is URL-encoded into the request path
+        called_url = mock_requests.get.call_args[0][0]
+        assert "a%20red%20fox%20in%20snow" in called_url
+        mock_bot.send_photo.assert_called_once()
+        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8fake-jpeg-bytes"
+
+
+def test_cmd_vortex_non_image_response_reports_error():
+    """If the service returns non-image content, send a friendly error, no photo."""
+    resp = MagicMock()
+    resp.headers = {"Content-Type": "text/html"}
+    resp.content = b"<html>rate limited</html>"
+    resp.raise_for_status = MagicMock()
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.requests") as mock_requests,
+        patch("bot.handlers.keep_typing") as mock_keep,
+    ):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
+        mock_requests.get.return_value = resp
+        from bot.handlers import cmd_vortex
+
+        cmd_vortex(make_message(text="/vortex something"))
+        mock_bot.send_photo.assert_not_called()
+        assert "Couldn't generate" in mock_bot.send_message.call_args[0][1]
+
+
+def test_cmd_vortex_network_failure_reports_error():
+    """A request exception degrades to a friendly error, never raising."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.requests") as mock_requests,
+        patch("bot.handlers.keep_typing") as mock_keep,
+    ):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
+        mock_requests.get.side_effect = Exception("connection timed out")
+        from bot.handlers import cmd_vortex
+
+        cmd_vortex(make_message(text="/vortex something"))
+        mock_bot.send_photo.assert_not_called()
+        assert "Couldn't generate" in mock_bot.send_message.call_args[0][1]

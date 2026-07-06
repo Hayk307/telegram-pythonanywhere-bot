@@ -4,6 +4,9 @@ import os
 import random
 import tempfile
 from datetime import datetime
+from urllib.parse import quote
+
+import requests
 
 from pyexpat.errors import messages
 
@@ -95,6 +98,7 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
+        "🌀 /vortex — Generate an image from a description: /vortex a red fox in snow",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -272,6 +276,7 @@ def cmd_doc(message):
     send_reply(message, reply)
 
 
+
 @bot.message_handler(commands=["currency"], func=is_allowed)
 def cmd_currency(message):
     request = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
@@ -324,6 +329,59 @@ def cmd_explain(message):
         reply = ask_ai(message.from_user.id, prompt)
     send_reply(message, reply)
 
+
+
+# /vortex — text-to-image via Pollinations (image.pollinations.ai), a free,
+# no-API-key service. The prompt is URL-encoded straight into the path and the
+# response body IS the generated JPEG, which we hand directly to send_photo.
+# Generation is slow (often 10-30s) and occasionally flaky under load, so we
+# use a generous timeout and degrade to a friendly error on any failure.
+# NOTE for PythonAnywhere: image.pollinations.ai is not on the free-tier
+# outbound whitelist by default — request it on the PA forum or /vortex will
+# time out in production while still working locally.
+VORTEX_ENDPOINT = "https://image.pollinations.ai/prompt/"
+VORTEX_TIMEOUT = 90  # seconds — Pollinations can be slow under load
+VORTEX_WIDTH = 1024
+VORTEX_HEIGHT = 1024
+# Telegram caps photo captions at 1024 chars; keep well under it.
+VORTEX_CAPTION_LIMIT = 900
+
+
+@bot.message_handler(commands=["vortex"], func=is_allowed)
+def cmd_vortex(message):
+    prompt = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    if not prompt:
+        bot.send_message(
+            message.chat.id,
+            "🌀 Usage: /vortex <describe the image>\n\n"
+            "Examples:\n"
+            "/vortex a neon cyberpunk cat on a skateboard\n"
+            "/vortex watercolor mountains at sunrise\n\n"
+            "I'll generate an image from your description. ✨",
+        )
+        return
+    # safe="" so slashes, spaces, and other reserved chars in the prompt are
+    # all percent-encoded into the single path segment Pollinations expects.
+    url = VORTEX_ENDPOINT + quote(prompt, safe="")
+    params = {"width": VORTEX_WIDTH, "height": VORTEX_HEIGHT, "nologo": "true"}
+    try:
+        with keep_typing(message.chat.id):
+            resp = requests.get(url, params=params, timeout=VORTEX_TIMEOUT)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        if not content_type.startswith("image/") or not resp.content:
+            raise ValueError(
+                f"unexpected response ({content_type or 'no content-type'})"
+            )
+        caption = prompt if len(prompt) <= VORTEX_CAPTION_LIMIT else prompt[:VORTEX_CAPTION_LIMIT] + "…"
+        bot.send_photo(message.chat.id, resp.content, caption=f"🌀 {caption}")
+        _log(message, "out", f"[vortex image] {prompt}")
+    except Exception as e:
+        print(f"/vortex failed: {e}")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Couldn't generate that image right now. Please try again in a moment.",
+        )
 
 
 def _load_notes(user_id: int) -> list:
