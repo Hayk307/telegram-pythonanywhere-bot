@@ -98,7 +98,7 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
-        "🌀 /image — Generate an image from a description: /image a red fox in snow",
+        "🌀 /image — Real photo of a real subject, or a generated one: /image Eiffel Tower",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -330,20 +330,149 @@ def cmd_explain(message):
 
 
 
-# /vortex — text-to-image via Pollinations (image.pollinations.ai), a free,
-# no-API-key service. The prompt is URL-encoded straight into the path and the
-# response body IS the generated JPEG, which we hand directly to send_photo.
-# Generation is slow (often 10-30s) and occasionally flaky under load, so we
-# use a generous timeout and degrade to a friendly error on any failure.
-# NOTE for PythonAnywhere: image.pollinations.ai is not on the free-tier
-# outbound whitelist by default — request it on the PA forum or /vortex will
-# time out in production while still working locally.
-VORTEX_ENDPOINT = "https://image.pollinations.ai/prompt/"
-VORTEX_TIMEOUT = 90  # seconds — Pollinations can be slow under load
-VORTEX_WIDTH = 1024
-VORTEX_HEIGHT = 1024
+# /image — smart image command. It first asks the AI to classify the request:
+#   • REAL subject (an identifiable person, place, or thing that has actual
+#     photographs — "Albert Einstein", "Eiffel Tower") → fetch a real photo
+#     from Wikipedia and send that.
+#   • CREATIVE brief (something imaginary to be made — "a dragon on a
+#     skateboard", "watercolor mountains") → GENERATE it with Pollinations
+#     (image.pollinations.ai), a free, no-API-key text-to-image service.
+# Every step degrades gracefully: a failed classification, a missing Wikipedia
+# photo, or an SVG/oversized result all fall through to generation, and a
+# failed generation ends in a friendly error rather than an exception.
+#
+# NOTE for PythonAnywhere: none of image.pollinations.ai, en.wikipedia.org, or
+# upload.wikimedia.org are on the free-tier outbound whitelist by default —
+# request them on the PA forum, or /image will time out in production while
+# still working locally.
+POLLINATIONS_ENDPOINT = "https://image.pollinations.ai/prompt/"
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+IMAGE_TIMEOUT = 90  # seconds — Pollinations can be slow under load
+WIKI_TIMEOUT = 15  # seconds — Wikipedia is fast; fail over to generation quickly
+IMAGE_WIDTH = 1024
+IMAGE_HEIGHT = 1024
 # Telegram caps photo captions at 1024 chars; keep well under it.
-VORTEX_CAPTION_LIMIT = 900
+IMAGE_CAPTION_LIMIT = 900
+# Wikipedia's API etiquette asks for a descriptive User-Agent.
+WIKI_USER_AGENT = "telegram-pythonanywhere-bot/1.0 (educational Telegram bot)"
+
+
+def _classify_image_request(user_id: int, prompt: str):
+    """Ask the AI whether `prompt` names a real subject or a creative brief.
+
+    Returns (is_real, subject): is_real True when the prompt refers to an
+    identifiable real person/place/thing with actual photos, and subject the
+    canonical name to look up on Wikipedia. Any AI/parse failure returns
+    (False, prompt) so we simply fall back to generating the image.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a precise classifier that replies with only a JSON object.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "Decide whether this image request refers to a REAL, "
+                "identifiable person, place, organization, or specific "
+                "real-world object that has actual photographs (e.g. 'Albert "
+                "Einstein', 'Eiffel Tower', 'the Toyota Corolla'), versus an "
+                "IMAGINARY or artistic scene to be created (e.g. 'a dragon on "
+                "a skateboard', 'watercolor mountains at sunrise'). Reply with "
+                'ONLY a compact JSON object: {"real": true|false, "subject": '
+                '"<the real subject\'s common name, or empty string if not '
+                'real>"}. No other text.\n\n'
+                f"Request: {prompt}"
+            ),
+        },
+    ]
+    try:
+        raw = generate(user_id, messages).strip()
+        # Tolerate ```json fences some models wrap JSON in.
+        if raw.startswith("```"):
+            raw = raw.strip("`").strip()
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+        data = json.loads(raw)
+        subject = (data.get("subject") or prompt).strip()
+        return bool(data.get("real")), subject
+    except Exception as e:
+        print(f"/image classify failed: {e}")
+        return False, prompt
+
+
+def _fetch_real_photo(subject: str):
+    """Return real-photo bytes for `subject` via Wikipedia, or None.
+
+    Uses the MediaWiki pageimages API (generator=search picks the best-
+    matching page) to resolve a lead image, prefers the size-bounded
+    thumbnail over the full original, then downloads it. Returns None — so
+    the caller falls back to generation — when nothing suitable is found or
+    the result isn't a raster image Telegram can display (e.g. SVG logos).
+    """
+    if not subject:
+        return None
+    headers = {"User-Agent": WIKI_USER_AGENT}
+    try:
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": subject,
+            "gsrlimit": 1,
+            "prop": "pageimages",
+            "piprop": "thumbnail|original",
+            "pithumbsize": IMAGE_WIDTH,
+        }
+        meta = requests.get(
+            WIKI_API, params=params, headers=headers, timeout=WIKI_TIMEOUT
+        )
+        meta.raise_for_status()
+        pages = (meta.json().get("query") or {}).get("pages") or {}
+        image_url = None
+        for page in pages.values():
+            src = (page.get("thumbnail") or {}).get("source") or (
+                page.get("original") or {}
+            ).get("source")
+            if src:
+                image_url = src
+                break
+        if not image_url:
+            return None
+        img = requests.get(image_url, headers=headers, timeout=WIKI_TIMEOUT)
+        img.raise_for_status()
+        ctype = img.headers.get("Content-Type", "")
+        # send_photo needs a raster image; SVG (logos, flags) would be rejected.
+        if not ctype.startswith("image/") or "svg" in ctype or not img.content:
+            return None
+        return img.content
+    except Exception as e:
+        print(f"/image real-photo lookup failed: {e}")
+        return None
+
+
+def _generate_image(prompt: str):
+    """Generate an image from a free-form prompt via Pollinations.
+
+    Returns JPEG bytes, or None on any failure. safe="" percent-encodes the
+    whole prompt into the single path segment Pollinations expects.
+    """
+    url = POLLINATIONS_ENDPOINT + quote(prompt, safe="")
+    params = {"width": IMAGE_WIDTH, "height": IMAGE_HEIGHT, "nologo": "true"}
+    try:
+        resp = requests.get(url, params=params, timeout=IMAGE_TIMEOUT)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "")
+        if not ctype.startswith("image/") or not resp.content:
+            raise ValueError(f"unexpected response ({ctype or 'no content-type'})")
+        return resp.content
+    except Exception as e:
+        print(f"/image generation failed: {e}")
+        return None
+
+
+def _clip_caption(text: str) -> str:
+    return text if len(text) <= IMAGE_CAPTION_LIMIT else text[:IMAGE_CAPTION_LIMIT] + "…"
 
 
 @bot.message_handler(commands=["image"], func=is_allowed)
@@ -352,34 +481,38 @@ def cmd_image(message):
     if not prompt:
         bot.send_message(
             message.chat.id,
-            "🌀 Usage: /image <describe the image>\n\n"
+            "🌀 Usage: /image <a real subject or something to create>\n\n"
             "Examples:\n"
-            "/image a neon cyberpunk cat on a skateboard\n"
-            "/image watercolor mountains at sunrise\n\n"
-            "I'll generate an image from your description. ✨",
+            "📷 /image Eiffel Tower — I'll send a real photo\n"
+            "📷 /image Albert Einstein — a real photo\n"
+            "🌀 /image a neon cyberpunk cat on a skateboard — I'll generate it\n\n"
+            "Real people and things get a real photo; imaginary ideas I create. ✨",
         )
         return
-    # safe="" so slashes, spaces, and other reserved chars in the prompt are
-    # all percent-encoded into the single path segment Pollinations expects.
-    url = VORTEX_ENDPOINT + quote(prompt, safe="")
-    params = {"width": VORTEX_WIDTH, "height": VORTEX_HEIGHT, "nologo": "true"}
     try:
         with keep_typing(message.chat.id):
-            resp = requests.get(url, params=params, timeout=VORTEX_TIMEOUT)
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
-        if not content_type.startswith("image/") or not resp.content:
-            raise ValueError(
-                f"unexpected response ({content_type or 'no content-type'})"
+            is_real, subject = _classify_image_request(message.from_user.id, prompt)
+            photo = _fetch_real_photo(subject) if is_real else None
+            if photo is not None:
+                bot.send_photo(
+                    message.chat.id, photo, caption=f"📷 {_clip_caption(subject)}"
+                )
+                _log(message, "out", f"[real photo] {subject}")
+                return
+            data = _generate_image(prompt)
+        if data is None:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ Couldn't get that image right now. Please try again in a moment.",
             )
-        caption = prompt if len(prompt) <= VORTEX_CAPTION_LIMIT else prompt[:VORTEX_CAPTION_LIMIT] + "…"
-        bot.send_photo(message.chat.id, resp.content, caption=f"🌀 {caption}")
-        _log(message, "out", f"[vortex image] {prompt}")
+            return
+        bot.send_photo(message.chat.id, data, caption=f"🌀 {_clip_caption(prompt)}")
+        _log(message, "out", f"[generated image] {prompt}")
     except Exception as e:
-        print(f"/vortex failed: {e}")
+        print(f"/image failed: {e}")
         bot.send_message(
             message.chat.id,
-            "⚠️ Couldn't generate that image right now. Please try again in a moment.",
+            "⚠️ Couldn't get that image right now. Please try again in a moment.",
         )
 
 

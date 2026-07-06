@@ -548,80 +548,194 @@ def test_handle_file_conversion_error_is_reported():
         assert "can't convert that" in mock_bot.send_message.call_args[0][1]
 
 
-# ── /vortex (image generation) ──────────────────────────────────────────────
+# ── /image (real photo vs generated) ────────────────────────────────────────
 
 
-def test_cmd_vortex_no_prompt_shows_usage():
-    """/vortex with no description shows usage and never hits the network."""
+def _patch_image_typing(stack_keep):
+    stack_keep.return_value.__enter__ = MagicMock(return_value=None)
+    stack_keep.return_value.__exit__ = MagicMock(return_value=None)
+
+
+def test_cmd_image_no_prompt_shows_usage():
+    """/image with no description shows usage and never classifies or fetches."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.requests") as mock_requests,
+        patch("bot.handlers._classify_image_request") as mock_classify,
+        patch("bot.handlers._generate_image") as mock_gen,
     ):
-        from bot.handlers import cmd_vortex
+        from bot.handlers import cmd_image
 
-        cmd_vortex(make_message(text="/vortex"))
-        mock_requests.get.assert_not_called()
+        cmd_image(make_message(text="/image"))
+        mock_classify.assert_not_called()
+        mock_gen.assert_not_called()
         assert "Usage" in mock_bot.send_message.call_args[0][1]
 
 
-def test_cmd_vortex_happy_path_sends_photo():
-    """A valid prompt fetches the image and sends the raw bytes via send_photo."""
-    resp = MagicMock()
-    resp.headers = {"Content-Type": "image/jpeg"}
-    resp.content = b"\xff\xd8fake-jpeg-bytes"
-    resp.raise_for_status = MagicMock()
+def test_cmd_image_real_subject_sends_real_photo():
+    """A real subject fetches a Wikipedia photo and sends it — no generation."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.requests") as mock_requests,
         patch("bot.handlers.keep_typing") as mock_keep,
+        patch(
+            "bot.handlers._classify_image_request",
+            return_value=(True, "Albert Einstein"),
+        ),
+        patch(
+            "bot.handlers._fetch_real_photo", return_value=b"\xff\xd8real-photo"
+        ) as mock_fetch,
+        patch("bot.handlers._generate_image") as mock_gen,
     ):
-        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
-        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
-        mock_requests.get.return_value = resp
-        from bot.handlers import cmd_vortex
+        _patch_image_typing(mock_keep)
+        from bot.handlers import cmd_image
 
-        cmd_vortex(make_message(text="/vortex a red fox in snow"))
-
-        # prompt is URL-encoded into the request path
-        called_url = mock_requests.get.call_args[0][0]
-        assert "a%20red%20fox%20in%20snow" in called_url
+        cmd_image(make_message(text="/image Albert Einstein"))
+        mock_fetch.assert_called_once_with("Albert Einstein")
+        mock_gen.assert_not_called()
         mock_bot.send_photo.assert_called_once()
-        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8fake-jpeg-bytes"
+        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8real-photo"
+        assert "Einstein" in mock_bot.send_photo.call_args.kwargs["caption"]
 
 
-def test_cmd_vortex_non_image_response_reports_error():
-    """If the service returns non-image content, send a friendly error, no photo."""
-    resp = MagicMock()
-    resp.headers = {"Content-Type": "text/html"}
-    resp.content = b"<html>rate limited</html>"
-    resp.raise_for_status = MagicMock()
+def test_cmd_image_creative_prompt_generates():
+    """A creative prompt skips the photo lookup and generates the image."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.requests") as mock_requests,
         patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers._classify_image_request", return_value=(False, "")),
+        patch("bot.handlers._fetch_real_photo") as mock_fetch,
+        patch(
+            "bot.handlers._generate_image", return_value=b"\xff\xd8generated"
+        ) as mock_gen,
     ):
-        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
-        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
-        mock_requests.get.return_value = resp
-        from bot.handlers import cmd_vortex
+        _patch_image_typing(mock_keep)
+        from bot.handlers import cmd_image
 
-        cmd_vortex(make_message(text="/vortex something"))
-        mock_bot.send_photo.assert_not_called()
-        assert "Couldn't generate" in mock_bot.send_message.call_args[0][1]
+        cmd_image(make_message(text="/image a dragon on a skateboard"))
+        mock_fetch.assert_not_called()
+        mock_gen.assert_called_once_with("a dragon on a skateboard")
+        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8generated"
 
 
-def test_cmd_vortex_network_failure_reports_error():
-    """A request exception degrades to a friendly error, never raising."""
+def test_cmd_image_real_but_no_photo_falls_back_to_generate():
+    """Real subject with no usable Wikipedia photo falls back to generation."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.requests") as mock_requests,
         patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers._classify_image_request", return_value=(True, "Obscure")),
+        patch("bot.handlers._fetch_real_photo", return_value=None),
+        patch(
+            "bot.handlers._generate_image", return_value=b"\xff\xd8generated"
+        ) as mock_gen,
     ):
-        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
-        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
-        mock_requests.get.side_effect = Exception("connection timed out")
-        from bot.handlers import cmd_vortex
+        _patch_image_typing(mock_keep)
+        from bot.handlers import cmd_image
 
-        cmd_vortex(make_message(text="/vortex something"))
+        cmd_image(make_message(text="/image Obscure"))
+        mock_gen.assert_called_once_with("Obscure")
+        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8generated"
+
+
+def test_cmd_image_generation_failure_reports_error():
+    """When generation returns None, send a friendly error and no photo."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers._classify_image_request", return_value=(False, "")),
+        patch("bot.handlers._generate_image", return_value=None),
+    ):
+        _patch_image_typing(mock_keep)
+        from bot.handlers import cmd_image
+
+        cmd_image(make_message(text="/image something"))
         mock_bot.send_photo.assert_not_called()
-        assert "Couldn't generate" in mock_bot.send_message.call_args[0][1]
+        assert "Couldn't get that image" in mock_bot.send_message.call_args[0][1]
+
+
+# ── /image helpers ──────────────────────────────────────────────────────────
+
+
+def test_classify_image_request_parses_json():
+    with patch(
+        "bot.handlers.generate",
+        return_value='{"real": true, "subject": "Eiffel Tower"}',
+    ):
+        from bot.handlers import _classify_image_request
+
+        is_real, subject = _classify_image_request(123, "the eiffel tower")
+        assert is_real is True
+        assert subject == "Eiffel Tower"
+
+
+def test_classify_image_request_strips_code_fence():
+    with patch(
+        "bot.handlers.generate",
+        return_value='```json\n{"real": false, "subject": ""}\n```',
+    ):
+        from bot.handlers import _classify_image_request
+
+        is_real, subject = _classify_image_request(123, "a flying whale")
+        assert is_real is False
+        # empty subject falls back to the original prompt
+        assert subject == "a flying whale"
+
+
+def test_classify_image_request_bad_output_defaults_to_generate():
+    """Unparseable AI output must degrade to (False, prompt) — never raise."""
+    with patch("bot.handlers.generate", return_value="I think that's real!"):
+        from bot.handlers import _classify_image_request
+
+        assert _classify_image_request(123, "mystery") == (False, "mystery")
+
+
+def test_fetch_real_photo_returns_image_bytes():
+    """pageimages lookup resolves a thumbnail, which is then downloaded."""
+    meta = MagicMock()
+    meta.raise_for_status = MagicMock()
+    meta.json.return_value = {
+        "query": {
+            "pages": {
+                "736": {"thumbnail": {"source": "https://upload.wikimedia.org/x.jpg"}}
+            }
+        }
+    }
+    img = MagicMock()
+    img.raise_for_status = MagicMock()
+    img.headers = {"Content-Type": "image/jpeg"}
+    img.content = b"\xff\xd8photo"
+    with patch("bot.handlers.requests") as mock_requests:
+        mock_requests.get.side_effect = [meta, img]
+        from bot.handlers import _fetch_real_photo
+
+        assert _fetch_real_photo("Einstein") == b"\xff\xd8photo"
+
+
+def test_fetch_real_photo_none_when_no_image():
+    """A page with no lead image returns None so the caller generates instead."""
+    meta = MagicMock()
+    meta.raise_for_status = MagicMock()
+    meta.json.return_value = {"query": {"pages": {"1": {"title": "X"}}}}
+    with patch("bot.handlers.requests") as mock_requests:
+        mock_requests.get.return_value = meta
+        from bot.handlers import _fetch_real_photo
+
+        assert _fetch_real_photo("nothing") is None
+
+
+def test_fetch_real_photo_rejects_svg():
+    """SVG results (logos/flags) aren't sendable as a photo → None."""
+    meta = MagicMock()
+    meta.raise_for_status = MagicMock()
+    meta.json.return_value = {
+        "query": {
+            "pages": {"1": {"thumbnail": {"source": "https://upload.wikimedia.org/f.svg"}}}
+        }
+    }
+    img = MagicMock()
+    img.raise_for_status = MagicMock()
+    img.headers = {"Content-Type": "image/svg+xml"}
+    img.content = b"<svg/>"
+    with patch("bot.handlers.requests") as mock_requests:
+        mock_requests.get.side_effect = [meta, img]
+        from bot.handlers import _fetch_real_photo
+
+        assert _fetch_real_photo("some flag") is None
