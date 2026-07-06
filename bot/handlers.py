@@ -98,7 +98,7 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
-        "🌀 /vortex — Generate an image from a description: /vortex a red fox in snow",
+        "🌀 /image — Generate an image from a description: /image a red fox in snow",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -276,7 +276,6 @@ def cmd_doc(message):
     send_reply(message, reply)
 
 
-
 @bot.message_handler(commands=["currency"], func=is_allowed)
 def cmd_currency(message):
     request = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
@@ -347,16 +346,16 @@ VORTEX_HEIGHT = 1024
 VORTEX_CAPTION_LIMIT = 900
 
 
-@bot.message_handler(commands=["vortex"], func=is_allowed)
-def cmd_vortex(message):
+@bot.message_handler(commands=["image"], func=is_allowed)
+def cmd_image(message):
     prompt = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
     if not prompt:
         bot.send_message(
             message.chat.id,
-            "🌀 Usage: /vortex <describe the image>\n\n"
+            "🌀 Usage: /image <describe the image>\n\n"
             "Examples:\n"
-            "/vortex a neon cyberpunk cat on a skateboard\n"
-            "/vortex watercolor mountains at sunrise\n\n"
+            "/image a neon cyberpunk cat on a skateboard\n"
+            "/image watercolor mountains at sunrise\n\n"
             "I'll generate an image from your description. ✨",
         )
         return
