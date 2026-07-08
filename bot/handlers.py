@@ -1,5 +1,6 @@
+import base64
 import json
-
+import mimetypes
 import os
 import random
 import tempfile
@@ -13,6 +14,8 @@ from pyexpat.errors import messages
 from bot.clients import bot, BOT_INFO, store
 from bot.config import (
     COMMIT_SHA,
+    GEMINI_API_KEY,
+    GEMINI_IMAGE_MODEL,
     GOOGLE_API_KEY,
     GOOGLE_CSE_ID,
     HF_SPACE_ID,
@@ -616,33 +619,30 @@ def cmd_image(message):
         )
 
 
-# /edit — image-to-image editing. The user supplies a photo (either by replying
-# to one with `/edit <prompt>`, or by sending a photo captioned `/edit <prompt>`)
-# and a text prompt describing the change ("make it winter", "turn into a
-# watercolor"). We hand the source photo plus the prompt to Pollinations' free
-# `kontext` model (Flux Kontext), which does prompt-guided editing with no API
-# key — the same no-key service /image already uses for generation.
+# /edit — true image editing. The user supplies a photo (either by replying to
+# one with `/edit <prompt>`, or by sending a photo captioned `/edit <prompt>`)
+# and a text instruction describing the change ("make it winter", "turn it into
+# a watercolor"). We download the photo's bytes from Telegram and hand them,
+# with the instruction, to Google Gemini's image model ("Nano Banana"), which
+# edits the actual photo (preserving the original) rather than generating a new
+# one from scratch.
 #
-# Pollinations' image-to-image only accepts the source image as a *URL*, so we
-# pass Telegram's own file URL. HEADS UP: that URL embeds the bot token
-# (…/file/bot<TOKEN>/<path>), so this hands the token to Pollinations (and any
-# intermediary that logs the fetch). That's an acceptable trade-off for a
-# free, teaching-oriented template, but don't copy this pattern into anything
-# where the token is sensitive — host the image elsewhere and pass that URL.
+# Why Gemini and not Pollinations (which /image uses for generation): the free
+# Pollinations endpoint no longer offers an image-to-image model — its editing
+# model (`kontext`) moved to a paid tier, and every free model silently ignores
+# the source image and just does text-to-image. So real editing needs a keyed
+# backend; Gemini has a free tier and reuses this project's Google key.
 #
-# Same PA whitelist caveat as /image applies: image.pollinations.ai is not on
-# the free-tier outbound whitelist by default.
-EDIT_MODEL = "kontext"
-
-
-def _telegram_file_url(file_id: str) -> str:
-    """Resolve a Telegram file_id to a publicly fetchable download URL.
-
-    The URL embeds the bot token (see the /edit note above) — only use it for
-    a trusted downstream fetch.
-    """
-    info = bot.get_file(file_id)
-    return f"https://api.telegram.org/file/bot{bot.token}/{info.file_path}"
+# Sending the image as bytes (not a URL) also means we never expose the bot
+# token to a third party the way a Telegram file URL would.
+#
+# Config: GEMINI_API_KEY (defaults to GOOGLE_API_KEY) must have the Generative
+# Language API enabled. When it's unset, /edit tells the user it's off. PA
+# whitelist caveat: generativelanguage.googleapis.com is not on the free-tier
+# outbound whitelist by default.
+GEMINI_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
 
 
 def _photo_file_id(msg):
@@ -659,37 +659,80 @@ def _photo_file_id(msg):
     return None
 
 
-def _edit_image(prompt: str, image_url: str):
-    """Edit the image at `image_url` per `prompt` via Pollinations' kontext model.
+def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
+    """Edit `image_bytes` per `prompt` via Gemini's image model.
 
-    Returns image bytes, or None on any failure. safe="" percent-encodes the
-    whole prompt into the single path segment Pollinations expects; the source
-    image is passed as the `image` query parameter.
+    Returns the edited image's bytes, or None on any failure (unset key,
+    network/HTTP error, or a response that carries no image — e.g. the model
+    replied with a safety refusal instead of an image). The source image is
+    sent inline as base64; the edited image comes back the same way.
     """
-    url = POLLINATIONS_ENDPOINT + quote(prompt, safe="")
-    params = {"model": EDIT_MODEL, "image": image_url, "nologo": "true"}
+    if not GEMINI_API_KEY:
+        return None
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": base64.b64encode(image_bytes).decode("ascii"),
+                        }
+                    },
+                ]
+            }
+        ],
+        # Ask for an image back; TEXT is included because the model may also
+        # emit a short note, and some API versions reject an IMAGE-only list.
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
     try:
-        resp = requests.get(url, params=params, timeout=IMAGE_TIMEOUT)
+        resp = requests.post(
+            GEMINI_ENDPOINT.format(model=GEMINI_IMAGE_MODEL),
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=IMAGE_TIMEOUT,
+        )
         resp.raise_for_status()
-        ctype = resp.headers.get("Content-Type", "")
-        if not ctype.startswith("image/") or not resp.content:
-            raise ValueError(f"unexpected response ({ctype or 'no content-type'})")
-        return resp.content
+        data = resp.json()
+        for cand in data.get("candidates") or []:
+            for part in (cand.get("content") or {}).get("parts") or []:
+                inline = part.get("inlineData") or part.get("inline_data")
+                if inline and inline.get("data"):
+                    return base64.b64decode(inline["data"])
+        # No image part — usually a safety block or a text-only reply. Log a
+        # short slice of the response so the reason is visible in the console.
+        print(f"/edit: Gemini returned no image. Response: {json.dumps(data)[:500]}")
+        return None
     except Exception as e:
-        print(f"/edit failed: {e}")
+        print(f"/edit Gemini call failed: {e}")
         return None
 
 
 def _run_edit(message, file_id: str, prompt: str) -> None:
-    """Shared /edit worker: fetch the source photo's URL, edit it, reply."""
+    """Shared /edit worker: download the source photo, edit it, reply."""
+    if not GEMINI_API_KEY:
+        bot.send_message(
+            message.chat.id,
+            "✏️ Image editing isn't set up on this bot. Ask the owner to set "
+            "GEMINI_API_KEY (a Google API key with the Generative Language API "
+            "enabled) to turn it on.",
+        )
+        return
     try:
         with keep_typing(message.chat.id):
-            image_url = _telegram_file_url(file_id)
-            data = _edit_image(prompt, image_url)
+            info = bot.get_file(file_id)
+            image_bytes = bot.download_file(info.file_path)
+            mime = mimetypes.guess_type(info.file_path or "")[0] or "image/jpeg"
+            if not mime.startswith("image/"):
+                mime = "image/jpeg"
+            data = _edit_image(prompt, image_bytes, mime)
         if data is None:
             bot.send_message(
                 message.chat.id,
-                "⚠️ Couldn't edit that image right now. Please try again in a moment.",
+                "⚠️ Couldn't edit that image right now. It may have been blocked "
+                "or the service was busy — please try a different prompt or image.",
             )
             return
         bot.send_photo(message.chat.id, data, caption=f"✏️ {_clip_caption(prompt)}")

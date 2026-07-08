@@ -95,6 +95,20 @@ MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
 GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
+# Image editing (/edit) via Google Gemini's image model ("Nano Banana").
+# GEMINI_API_KEY enables /edit; it defaults to GOOGLE_API_KEY so a single
+# Google key can power both /image search and /edit — but the key must have
+# the *Generative Language API* enabled (that's separate from the Custom
+# Search API used by /image). Get a key at https://aistudio.google.com/apikey.
+# Free tier available. On PA, add generativelanguage.googleapis.com to the
+# outbound whitelist. When neither key is set, /edit tells the user it's off.
+GEMINI_API_KEY = (
+    os.environ.get("GEMINI_API_KEY", "").strip() or GOOGLE_API_KEY
+)
+GEMINI_IMAGE_MODEL = os.environ.get(
+    "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
+).strip()
+
 # Hugging Face provider (optional) — when set, users can switch via /model
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()  # optional, for private spaces

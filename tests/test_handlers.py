@@ -813,3 +813,188 @@ def test_fetch_real_photo_falls_back_to_wikipedia():
         from bot.handlers import _fetch_real_photo
 
         assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8wiki"
+
+
+# ── /edit (Gemini image editing) ─────────────────────────────────────────────
+
+
+def make_photo_message(caption=None, text=None, reply_photo=False, user_id=123):
+    """A photo message. `caption` is the text sent WITH the photo; when
+    `reply_photo` is set, the message instead replies to a separate photo."""
+    msg = MagicMock()
+    msg.content_type = "photo"
+    msg.caption = caption
+    msg.text = text
+    msg.from_user.id = user_id
+    msg.chat.id = 456
+    msg.chat.type = "private"
+    size = MagicMock()
+    size.file_id = "PHOTOID"
+    msg.photo = [size]
+    msg.document = None
+    if reply_photo:
+        reply = MagicMock()
+        reply.photo = [size]
+        reply.document = None
+        msg.reply_to_message = reply
+    else:
+        msg.reply_to_message = None
+    return msg
+
+
+def _patch_edit_typing(stack_keep):
+    stack_keep.return_value.__enter__ = MagicMock(return_value=None)
+    stack_keep.return_value.__exit__ = MagicMock(return_value=None)
+
+
+def test_cmd_edit_reply_path_edits_and_sends_photo():
+    """Replying to a photo with /edit <prompt> downloads it, edits it, sends it."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers._edit_image", return_value=b"\xff\xd8edited") as mock_edit,
+    ):
+        _patch_edit_typing(mock_keep)
+        mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
+        mock_bot.download_file.return_value = b"src-bytes"
+
+        from bot.handlers import cmd_edit
+
+        msg = make_photo_message(text="/edit make it snowy", reply_photo=True)
+        msg.content_type = "text"  # the reply command itself is a text message
+        cmd_edit(msg)
+
+        mock_bot.get_file.assert_called_once_with("PHOTOID")
+        assert mock_edit.call_args[0][0] == "make it snowy"
+        assert mock_edit.call_args[0][1] == b"src-bytes"
+        mock_bot.send_photo.assert_called_once()
+        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8edited"
+
+
+def test_handle_file_caption_edit_path_edits_photo():
+    """Sending a photo captioned /edit <prompt> routes to the edit flow."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers._edit_image", return_value=b"\xff\xd8edited") as mock_edit,
+        patch("bot.handlers.fileconvert.convert") as mock_convert,
+    ):
+        _patch_edit_typing(mock_keep)
+        mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
+        mock_bot.download_file.return_value = b"src-bytes"
+
+        from bot.handlers import handle_file
+
+        handle_file(make_photo_message(caption="/edit turn it into a painting"))
+
+        mock_convert.assert_not_called()  # not treated as a file conversion
+        assert mock_edit.call_args[0][0] == "turn it into a painting"
+        mock_bot.send_photo.assert_called_once()
+
+
+def test_cmd_edit_without_reply_asks_for_photo():
+    """A bare /edit (no photo to work on) prompts the user for one."""
+    with patch("bot.handlers.bot") as mock_bot:
+        from bot.handlers import cmd_edit
+
+        msg = make_message(text="/edit make it snowy")  # no reply_to_message
+        cmd_edit(msg)
+        mock_bot.get_file.assert_not_called()
+        assert "photo" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_handle_file_caption_edit_without_prompt_shows_usage():
+    """A photo captioned just /edit (no instruction) shows usage, doesn't edit."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers._edit_image") as mock_edit,
+    ):
+        from bot.handlers import handle_file
+
+        handle_file(make_photo_message(caption="/edit"))
+        mock_edit.assert_not_called()
+        assert "Usage" in mock_bot.send_message.call_args[0][1]
+
+
+def test_run_edit_reports_when_not_configured():
+    """With no Gemini key, /edit tells the user editing is off and never calls out."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.GEMINI_API_KEY", ""),
+        patch("bot.handlers._edit_image") as mock_edit,
+    ):
+        from bot.handlers import _run_edit
+
+        _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
+        mock_edit.assert_not_called()
+        mock_bot.get_file.assert_not_called()
+        assert "GEMINI_API_KEY" in mock_bot.send_message.call_args[0][1]
+
+
+def test_edit_image_posts_to_gemini_and_decodes_result():
+    """_edit_image base64-encodes the source, POSTs to Gemini, decodes the reply."""
+    import base64
+
+    reply_bytes = b"\xff\xd8\xff-new-image"
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "Here you go"},
+                        {
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": base64.b64encode(reply_bytes).decode(),
+                            }
+                        },
+                    ]
+                }
+            }
+        ]
+    }
+    with (
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers.requests.post", return_value=fake_response) as mock_post,
+    ):
+        from bot.handlers import _edit_image
+
+        out = _edit_image("make it snowy", b"src", "image/jpeg")
+        assert out == reply_bytes
+        # The source image was sent inline as base64 in the request body.
+        sent = mock_post.call_args.kwargs["json"]
+        parts = sent["contents"][0]["parts"]
+        assert parts[0]["text"] == "make it snowy"
+        assert parts[1]["inlineData"]["data"] == base64.b64encode(b"src").decode()
+
+
+def test_edit_image_returns_none_when_no_image_in_response():
+    """A text-only / safety-blocked response yields None (caller shows an error)."""
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "I can't edit that."}]}}]
+    }
+    with (
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers.requests.post", return_value=fake_response),
+    ):
+        from bot.handlers import _edit_image
+
+        assert _edit_image("do something", b"src") is None
+
+
+def test_edit_image_returns_none_without_key():
+    """No key configured → no network call, returns None."""
+    with (
+        patch("bot.handlers.GEMINI_API_KEY", ""),
+        patch("bot.handlers.requests.post") as mock_post,
+    ):
+        from bot.handlers import _edit_image
+
+        assert _edit_image("x", b"src") is None
+        mock_post.assert_not_called()
