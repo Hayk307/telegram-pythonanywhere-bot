@@ -1,4 +1,3 @@
-import base64
 import json
 import mimetypes
 import os
@@ -14,11 +13,11 @@ from pyexpat.errors import messages
 from bot.clients import bot, BOT_INFO, store
 from bot.config import (
     COMMIT_SHA,
-    GEMINI_API_KEY,
-    GEMINI_IMAGE_MODEL,
     GOOGLE_API_KEY,
     GOOGLE_CSE_ID,
+    HF_EDIT_SPACE_ID,
     HF_SPACE_ID,
+    HF_TOKEN,
     HOSTING_LABEL,
     MODEL,
     RATE_LIMIT,
@@ -619,30 +618,25 @@ def cmd_image(message):
         )
 
 
-# /edit — true image editing. The user supplies a photo (either by replying to
-# one with `/edit <prompt>`, or by sending a photo captioned `/edit <prompt>`)
-# and a text instruction describing the change ("make it winter", "turn it into
-# a watercolor"). We download the photo's bytes from Telegram and hand them,
-# with the instruction, to Google Gemini's image model ("Nano Banana"), which
-# edits the actual photo (preserving the original) rather than generating a new
-# one from scratch.
+# /edit — true image editing, for FREE. The user supplies a photo (either by
+# replying to one with `/edit <prompt>`, or by sending a photo captioned
+# `/edit <prompt>`) and a text instruction ("make it winter", "add a hat"). We
+# download the photo from Telegram and send it, with the instruction, to a free
+# Hugging Face Space (Flux.1 Kontext by default, HF_EDIT_SPACE_ID) via
+# gradio_client. The Space edits the actual photo and returns a new image.
 #
-# Why Gemini and not Pollinations (which /image uses for generation): the free
-# Pollinations endpoint no longer offers an image-to-image model — its editing
-# model (`kontext`) moved to a paid tier, and every free model silently ignores
-# the source image and just does text-to-image. So real editing needs a keyed
-# backend; Gemini has a free tier and reuses this project's Google key.
+# Why a HF Space and not an API: there is no free image-*editing* API left —
+# Pollinations (which /image uses to *generate*) dropped its edit model to a
+# paid tier and its free models ignore the input image, and Google Gemini's
+# image model has a zero free-tier quota (needs billing). A community HF Space
+# runs the model on donated/ZeroGPU hardware, so it costs the user nothing.
 #
-# Sending the image as bytes (not a URL) also means we never expose the bot
-# token to a third party the way a Telegram file URL would.
-#
-# Config: GEMINI_API_KEY (defaults to GOOGLE_API_KEY) must have the Generative
-# Language API enabled. When it's unset, /edit tells the user it's off. PA
-# whitelist caveat: generativelanguage.googleapis.com is not on the free-tier
-# outbound whitelist by default.
-GEMINI_ENDPOINT = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
+# Trade-offs (all handled gracefully, surfaced to the user via _EditError):
+#   • Shared + GPU-queued, so it can be slow or briefly unavailable.
+#   • Anonymous use has a per-IP quota; set HF_TOKEN (free) to raise it.
+#   • On PythonAnywhere's free tier, *.hf.space must be on the outbound
+#     whitelist (huggingface.co alone isn't enough), so /edit works locally but
+#     may be blocked on PA until that domain is requested.
 
 
 def _photo_file_id(msg):
@@ -665,81 +659,93 @@ class _EditError(Exception):
     *why* (bad key, no model access, quota, etc.) instead of a vague message."""
 
 
-def _gemini_error_detail(resp) -> str:
-    """Pull the human-readable reason out of a Gemini error response body."""
+def _normalize_for_telegram(data: bytes, mime: str):
+    """Return image bytes Telegram's send_photo will render inline.
+
+    The Flux Kontext Space returns WebP, which the photo endpoint rejects
+    (it only accepts JPEG/PNG). Convert anything that isn't JPEG/PNG to JPEG
+    with Pillow so it shows as a real photo. Pillow is imported lazily (like
+    fileconvert) so a missing dep doesn't break import — in that case we return
+    the bytes unchanged and _send_edited_image's document fallback delivers them.
+    """
+    if mime in ("image/jpeg", "image/png"):
+        return data, mime
     try:
-        return (resp.json().get("error") or {}).get("message") or resp.text[:200]
-    except Exception:
-        return (resp.text or "")[:200] or f"HTTP {resp.status_code}"
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(data)).convert("RGB")
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=92)
+        return out.getvalue(), "image/jpeg"
+    except Exception as e:
+        print(f"/edit could not convert {mime} to JPEG: {e}")
+        return data, mime
+
+
+def _extract_result_bytes(result):
+    """Pull image bytes + mime from a gradio_client `/infer` return value.
+
+    The Space returns `(image, seed)`; `image` is a local file path (gradio
+    downloads file outputs for us) or a dict carrying a `path`/`url`. Returns
+    `(bytes, mime)` or None if nothing usable is present.
+    """
+    image = result[0] if isinstance(result, (list, tuple)) and result else result
+    path = image.get("path") if isinstance(image, dict) else image
+    if isinstance(path, str) and os.path.exists(path):
+        with open(path, "rb") as fh:
+            return fh.read(), (mimetypes.guess_type(path)[0] or "image/png")
+    url = image.get("url") if isinstance(image, dict) else None
+    if url:
+        data = _download_image(url)
+        if data:
+            return data, "image/png"
+    return None
 
 
 def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
-    """Edit `image_bytes` per `prompt` via Gemini's image model.
+    """Edit `image_bytes` per `prompt` via the free Hugging Face editing Space.
 
-    Returns `(edited_bytes, out_mime)` on success, or None when the model
-    returned no image (e.g. a safety block or a text-only reply — the caller
-    turns that into a "try a different prompt" message). Raises `_EditError`
-    with a user-facing reason on a configuration / API / transport failure so
-    the real cause reaches the user instead of a generic "try again".
+    Returns `(edited_bytes, out_mime)` on success, or None when the Space
+    returned no usable image. Raises `_EditError` with a user-facing reason on
+    any failure (library missing, Space busy / down / over quota) so the real
+    cause reaches the user instead of a generic "try again".
     """
-    if not GEMINI_API_KEY:
-        return None
     try:
-        encoded = base64.b64encode(image_bytes).decode("ascii")
+        from gradio_client import Client, handle_file
     except Exception as e:
-        raise _EditError("I couldn't read that image file.") from e
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {"inlineData": {"mimeType": mime_type, "data": encoded}},
-                ]
-            }
-        ],
-        # Ask for an image back; TEXT is included because the model may also
-        # emit a short note, and some API versions reject an IMAGE-only list.
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
+        print(f"/edit gradio_client import failed: {e}")
+        raise _EditError("image editing isn't installed on this bot.") from e
+
+    ext = mimetypes.guess_extension(mime_type) or ".jpg"
     try:
-        resp = requests.post(
-            GEMINI_ENDPOINT.format(model=GEMINI_IMAGE_MODEL),
-            params={"key": GEMINI_API_KEY},
-            json=payload,
-            timeout=IMAGE_TIMEOUT,
-        )
-    except requests.RequestException as e:
-        print(f"/edit Gemini request failed: {e}")
-        raise _EditError("the image service didn't respond — try again shortly.") from e
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, f"input{ext}")
+            with open(src, "wb") as fh:
+                fh.write(image_bytes)
+            client = Client(HF_EDIT_SPACE_ID, hf_token=HF_TOKEN or None)
+            result = client.predict(
+                input_image=handle_file(src),
+                prompt=prompt,
+                seed=0,
+                randomize_seed=True,
+                guidance_scale=2.5,
+                steps=28,
+                api_name="/infer",
+            )
+    except Exception as e:
+        print(f"/edit HF Space call failed: {e}")
+        raise _EditError(
+            "the free image editor is busy or unavailable right now — "
+            "please try again in a minute."
+        ) from e
 
-    if resp.status_code != 200:
-        detail = _gemini_error_detail(resp)
-        print(f"/edit Gemini HTTP {resp.status_code}: {detail}")
-        raise _EditError(f"the image service rejected the request ({detail}).")
-
-    try:
-        data = resp.json()
-    except ValueError as e:
-        print(f"/edit Gemini returned non-JSON: {resp.text[:200]!r}")
-        raise _EditError("the image service returned an unreadable response.") from e
-
-    for cand in data.get("candidates") or []:
-        for part in (cand.get("content") or {}).get("parts") or []:
-            inline = part.get("inlineData") or part.get("inline_data")
-            if inline and inline.get("data"):
-                out_mime = (
-                    inline.get("mimeType") or inline.get("mime_type") or "image/png"
-                )
-                try:
-                    return base64.b64decode(inline["data"]), out_mime
-                except Exception as e:
-                    print(f"/edit could not decode returned image: {e}")
-                    raise _EditError("the edited image came back corrupted.") from e
-
-    # No image part — usually a safety block or a text-only reply. Log the
-    # response so the reason is visible in the console.
-    print(f"/edit: Gemini returned no image. Response: {json.dumps(data)[:500]}")
-    return None
+    extracted = _extract_result_bytes(result)
+    if extracted is None:
+        print(f"/edit HF Space returned no usable image: {result!r}")
+        return None
+    return _normalize_for_telegram(*extracted)
 
 
 def _send_edited_image(message, data: bytes, out_mime: str, prompt: str) -> None:
@@ -764,15 +770,6 @@ def _send_edited_image(message, data: bytes, out_mime: str, prompt: str) -> None
 
 def _run_edit(message, file_id: str, prompt: str) -> None:
     """Shared /edit worker: download the source photo, edit it, reply."""
-    if not GEMINI_API_KEY:
-        bot.send_message(
-            message.chat.id,
-            "✏️ Image editing isn't set up on this bot. Ask the owner to set "
-            "GEMINI_API_KEY (a Google API key with the Generative Language API "
-            "enabled) to turn it on.",
-        )
-        return
-
     # 1. Download the source photo from Telegram.
     try:
         info = bot.get_file(file_id)

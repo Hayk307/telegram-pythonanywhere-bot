@@ -815,7 +815,7 @@ def test_fetch_real_photo_falls_back_to_wikipedia():
         assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8wiki"
 
 
-# ── /edit (Gemini image editing) ─────────────────────────────────────────────
+# ── /edit (free Hugging Face Space image editing) ────────────────────────────
 
 
 def make_photo_message(caption=None, text=None, reply_photo=False, user_id=123):
@@ -852,11 +852,12 @@ def test_cmd_edit_reply_path_edits_and_sends_photo():
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
-        patch("bot.handlers._edit_image", return_value=b"\xff\xd8edited") as mock_edit,
+        patch(
+            "bot.handlers._edit_image",
+            return_value=(b"\xff\xd8edited", "image/png"),
+        ) as mock_edit,
     ):
         _patch_edit_typing(mock_keep)
-        mock_edit.return_value = (b"\xff\xd8edited", "image/png")
         mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
         mock_bot.download_file.return_value = b"src-bytes"
 
@@ -878,7 +879,6 @@ def test_handle_file_caption_edit_path_edits_photo():
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
         patch(
             "bot.handlers._edit_image",
             return_value=(b"\xff\xd8edited", "image/png"),
@@ -922,122 +922,60 @@ def test_handle_file_caption_edit_without_prompt_shows_usage():
         assert "Usage" in mock_bot.send_message.call_args[0][1]
 
 
-def test_run_edit_reports_when_not_configured():
-    """With no Gemini key, /edit tells the user editing is off and never calls out."""
-    with (
-        patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.GEMINI_API_KEY", ""),
-        patch("bot.handlers._edit_image") as mock_edit,
-    ):
-        from bot.handlers import _run_edit
+def test_edit_image_calls_hf_space_and_returns_bytes(tmp_path):
+    """_edit_image sends the photo + prompt to the HF Space and returns its bytes."""
+    result_file = tmp_path / "out.png"
+    result_file.write_bytes(b"\x89PNG-edited-bytes")
+    fake_client = MagicMock()
+    fake_client.predict.return_value = (str(result_file), 12345)
 
-        _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
-        mock_edit.assert_not_called()
-        mock_bot.get_file.assert_not_called()
-        assert "GEMINI_API_KEY" in mock_bot.send_message.call_args[0][1]
-
-
-def test_edit_image_posts_to_gemini_and_decodes_result():
-    """_edit_image base64-encodes the source, POSTs to Gemini, decodes the reply."""
-    import base64
-
-    reply_bytes = b"\xff\xd8\xff-new-image"
-    fake_response = MagicMock()
-    fake_response.status_code = 200
-    fake_response.json.return_value = {
-        "candidates": [
-            {
-                "content": {
-                    "parts": [
-                        {"text": "Here you go"},
-                        {
-                            "inlineData": {
-                                "mimeType": "image/png",
-                                "data": base64.b64encode(reply_bytes).decode(),
-                            }
-                        },
-                    ]
-                }
-            }
-        ]
-    }
-    with (
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
-        patch("bot.handlers.requests.post", return_value=fake_response) as mock_post,
-    ):
+    with patch("gradio_client.Client", return_value=fake_client):
         from bot.handlers import _edit_image
 
-        out_bytes, out_mime = _edit_image("make it snowy", b"src", "image/jpeg")
-        assert out_bytes == reply_bytes
+        out_bytes, out_mime = _edit_image("make it snowy", b"src-bytes", "image/jpeg")
+        assert out_bytes == b"\x89PNG-edited-bytes"
         assert out_mime == "image/png"
-        # The source image was sent inline as base64 in the request body.
-        sent = mock_post.call_args.kwargs["json"]
-        parts = sent["contents"][0]["parts"]
-        assert parts[0]["text"] == "make it snowy"
-        assert parts[1]["inlineData"]["data"] == base64.b64encode(b"src").decode()
+        kwargs = fake_client.predict.call_args.kwargs
+        assert kwargs["prompt"] == "make it snowy"
+        assert kwargs["api_name"] == "/infer"
 
 
-def test_edit_image_returns_none_when_no_image_in_response():
-    """A text-only / safety-blocked response yields None (caller shows an error)."""
-    fake_response = MagicMock()
-    fake_response.status_code = 200
-    fake_response.json.return_value = {
-        "candidates": [{"content": {"parts": [{"text": "I can't edit that."}]}}]
-    }
-    with (
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
-        patch("bot.handlers.requests.post", return_value=fake_response),
-    ):
-        from bot.handlers import _edit_image
-
-        assert _edit_image("do something", b"src") is None
-
-
-def test_edit_image_raises_editerror_on_api_error():
-    """An HTTP error (bad key, no model access, quota) surfaces the real reason."""
+def test_edit_image_raises_editerror_when_space_fails():
+    """A Space error (down / GPU quota / queue timeout) surfaces a clear reason."""
     from bot.handlers import _EditError
 
-    fake_response = MagicMock()
-    fake_response.status_code = 400
-    fake_response.json.return_value = {
-        "error": {"message": "API key not valid. Please pass a valid API key."}
-    }
-    with (
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
-        patch("bot.handlers.requests.post", return_value=fake_response),
-    ):
+    fake_client = MagicMock()
+    fake_client.predict.side_effect = Exception("GPU quota exceeded")
+    with patch("gradio_client.Client", return_value=fake_client):
         from bot.handlers import _edit_image
 
         try:
             _edit_image("x", b"src")
             assert False, "expected _EditError"
         except _EditError as e:
-            assert "API key not valid" in str(e)
+            assert "busy or unavailable" in str(e)
 
 
-def test_edit_image_returns_none_without_key():
-    """No key configured → no network call, returns None."""
-    with (
-        patch("bot.handlers.GEMINI_API_KEY", ""),
-        patch("bot.handlers.requests.post") as mock_post,
-    ):
+def test_edit_image_returns_none_when_no_usable_image():
+    """A response with no path/url yields None (caller shows a friendly message)."""
+    fake_client = MagicMock()
+    fake_client.predict.return_value = ({"path": None, "url": None}, 0)
+    with patch("gradio_client.Client", return_value=fake_client):
         from bot.handlers import _edit_image
 
         assert _edit_image("x", b"src") is None
-        mock_post.assert_not_called()
 
 
 def test_run_edit_surfaces_edit_error_reason():
-    """A _EditError from the API is shown to the user verbatim, not a vague msg."""
+    """A _EditError from the backend is shown to the user, not a vague message."""
     from bot.handlers import _EditError
 
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
         patch(
             "bot.handlers._edit_image",
-            side_effect=_EditError("the image service rejected the request (bad key)."),
+            side_effect=_EditError("the free image editor is busy or unavailable."),
         ),
     ):
         _patch_edit_typing(mock_keep)
@@ -1048,7 +986,7 @@ def test_run_edit_surfaces_edit_error_reason():
 
         _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
         sent = mock_bot.send_message.call_args[0][1]
-        assert "bad key" in sent
+        assert "busy or unavailable" in sent
         mock_bot.send_photo.assert_not_called()
 
 
@@ -1057,7 +995,6 @@ def test_run_edit_falls_back_to_document_when_photo_rejected():
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
         patch(
             "bot.handlers._edit_image",
             return_value=(b"\x89PNG-edited", "image/png"),
@@ -1077,10 +1014,9 @@ def test_run_edit_falls_back_to_document_when_photo_rejected():
 
 
 def test_run_edit_reports_download_failure():
-    """A failed Telegram download tells the user to resend, never calls the API."""
+    """A failed Telegram download tells the user to resend, never edits."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.GEMINI_API_KEY", "key"),
         patch("bot.handlers._edit_image") as mock_edit,
     ):
         mock_bot.get_file.side_effect = Exception("file too big")
@@ -1090,3 +1026,28 @@ def test_run_edit_reports_download_failure():
         _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
         mock_edit.assert_not_called()
         assert "resend" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_normalize_for_telegram_converts_webp_to_jpeg():
+    """The Space returns WebP; we convert to JPEG so send_photo renders it inline."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (32, 32), (10, 20, 30)).save(buf, format="WEBP")
+
+    from bot.handlers import _normalize_for_telegram
+
+    data, mime = _normalize_for_telegram(buf.getvalue(), "image/webp")
+    assert mime == "image/jpeg"
+    assert data[:3] == b"\xff\xd8\xff"  # valid JPEG magic
+
+
+def test_normalize_for_telegram_passes_jpeg_png_through():
+    """JPEG/PNG are already Telegram-friendly and are returned untouched."""
+    from bot.handlers import _normalize_for_telegram
+
+    assert _normalize_for_telegram(b"rawjpeg", "image/jpeg") == (b"rawjpeg", "image/jpeg")
+    assert _normalize_for_telegram(b"rawpng", "image/png") == (b"rawpng", "image/png")
+

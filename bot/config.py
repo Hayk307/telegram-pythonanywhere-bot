@@ -95,18 +95,17 @@ MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
 GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
-# Image editing (/edit) via Google Gemini's image model ("Nano Banana").
-# GEMINI_API_KEY enables /edit; it defaults to GOOGLE_API_KEY so a single
-# Google key can power both /image search and /edit — but the key must have
-# the *Generative Language API* enabled (that's separate from the Custom
-# Search API used by /image). Get a key at https://aistudio.google.com/apikey.
-# Free tier available. On PA, add generativelanguage.googleapis.com to the
-# outbound whitelist. When neither key is set, /edit tells the user it's off.
-GEMINI_API_KEY = (
-    os.environ.get("GEMINI_API_KEY", "").strip() or GOOGLE_API_KEY
-)
-GEMINI_IMAGE_MODEL = os.environ.get(
-    "GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"
+# Image editing (/edit) via a FREE Hugging Face Space (no API key, no billing).
+# The default is Black Forest Labs' Flux.1 Kontext space, which edits an
+# uploaded photo from a text instruction ("add a hat", "make it winter"). It's
+# called through gradio_client — the same library the optional HF chat provider
+# uses. Free but shared: it can be slow/queued, and it runs on HF's ZeroGPU, so
+# setting HF_TOKEN (a free token from huggingface.co/settings/tokens) raises the
+# per-IP quota. On PythonAnywhere's free tier this needs *.hf.space on the
+# outbound whitelist (huggingface.co alone isn't enough), so /edit works locally
+# but may be blocked on PA until that's requested.
+HF_EDIT_SPACE_ID = os.environ.get(
+    "HF_EDIT_SPACE_ID", "black-forest-labs/FLUX.1-Kontext-Dev"
 ).strip()
 
 # Hugging Face provider (optional) — when set, users can switch via /model
