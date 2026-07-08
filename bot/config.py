@@ -95,18 +95,31 @@ MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
 GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
-# Image editing (/edit) via a FREE Hugging Face Space (no API key, no billing).
-# The default is Black Forest Labs' Flux.1 Kontext space, which edits an
-# uploaded photo from a text instruction ("add a hat", "make it winter"). It's
-# called through gradio_client — the same library the optional HF chat provider
-# uses. Free but shared: it can be slow/queued, and it runs on HF's ZeroGPU, so
-# setting HF_TOKEN (a free token from huggingface.co/settings/tokens) raises the
-# per-IP quota. On PythonAnywhere's free tier this needs *.hf.space on the
-# outbound whitelist (huggingface.co alone isn't enough), so /edit works locally
-# but may be blocked on PA until that's requested.
-HF_EDIT_SPACE_ID = os.environ.get(
-    "HF_EDIT_SPACE_ID", "black-forest-labs/FLUX.1-Kontext-Dev"
-).strip()
+# Image editing (/edit) via FREE Hugging Face Spaces (no API key, no billing).
+# These are Flux.1 Kontext image-editing Spaces called through gradio_client
+# (same library the optional HF chat provider uses). They edit an uploaded
+# photo from a text instruction ("add a hat", "make it winter").
+#
+# HF_EDIT_SPACE_ID is a COMMA-SEPARATED FALLBACK CHAIN: the bot tries each Space
+# in order and moves to the next if one is queue-full / down / rate-limited.
+# This is the fix for the "free image editor is busy or unavailable" error —
+# free Spaces run on shared ZeroGPU, so a single Space alone is unreliable.
+# All Spaces in the default chain expose the SAME `/infer` signature
+# (input_image, prompt, seed, randomize_seed, guidance_scale, steps), so no
+# per-Space adapter code is needed; only add Spaces with that same signature.
+#
+# Optional HF_TOKEN (free, from huggingface.co/settings/tokens) raises the
+# anonymous per-IP quota. On PythonAnywhere's free tier /edit needs *.hf.space
+# on the outbound whitelist (huggingface.co alone isn't enough), so it works
+# locally but may be blocked on PA until that domain is requested.
+HF_EDIT_SPACE_IDS = [
+    s.strip()
+    for s in os.environ.get(
+        "HF_EDIT_SPACE_ID",
+        "black-forest-labs/FLUX.1-Kontext-Dev,Yuanshi/FLUX.1-Kontext-Turbo",
+    ).split(",")
+    if s.strip()
+]
 
 # Hugging Face provider (optional) — when set, users can switch via /model
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()

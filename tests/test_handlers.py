@@ -940,8 +940,8 @@ def test_edit_image_calls_hf_space_and_returns_bytes(tmp_path):
         assert kwargs["api_name"] == "/infer"
 
 
-def test_edit_image_raises_editerror_when_space_fails():
-    """A Space error (down / GPU quota / queue timeout) surfaces a clear reason."""
+def test_edit_image_raises_editerror_when_all_spaces_fail():
+    """When every Space in the fallback chain errors, a clear reason is raised."""
     from bot.handlers import _EditError
 
     fake_client = MagicMock()
@@ -953,17 +953,28 @@ def test_edit_image_raises_editerror_when_space_fails():
             _edit_image("x", b"src")
             assert False, "expected _EditError"
         except _EditError as e:
-            assert "busy or unavailable" in str(e)
+            assert "busy" in str(e)
 
 
-def test_edit_image_returns_none_when_no_usable_image():
-    """A response with no path/url yields None (caller shows a friendly message)."""
-    fake_client = MagicMock()
-    fake_client.predict.return_value = ({"path": None, "url": None}, 0)
-    with patch("gradio_client.Client", return_value=fake_client):
-        from bot.handlers import _edit_image
+def test_edit_image_falls_back_to_next_space():
+    """If the first Space raises, the bot transparently tries the next one."""
+    import bot.handlers as h
 
-        assert _edit_image("x", b"src") is None
+    good = MagicMock()
+    good.predict.return_value = ({"path": None, "url": "http://x/out.png"}, 0)
+
+    def client_factory(space_id, **kw):
+        if space_id == h.HF_EDIT_SPACE_IDS[0]:
+            raise Exception("Queue full (50/50)")
+        return good
+
+    with (
+        patch.object(h, "HF_EDIT_SPACE_IDS", ["space/one", "space/two"]),
+        patch("gradio_client.Client", side_effect=client_factory),
+        patch("bot.handlers._download_image", return_value=b"\x89PNG-from-fallback"),
+    ):
+        out_bytes, out_mime = h._edit_image("x", b"src")
+        assert out_bytes == b"\x89PNG-from-fallback"
 
 
 def test_run_edit_surfaces_edit_error_reason():

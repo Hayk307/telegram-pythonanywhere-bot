@@ -15,7 +15,7 @@ from bot.config import (
     COMMIT_SHA,
     GOOGLE_API_KEY,
     GOOGLE_CSE_ID,
-    HF_EDIT_SPACE_ID,
+    HF_EDIT_SPACE_IDS,
     HF_SPACE_ID,
     HF_TOKEN,
     HOSTING_LABEL,
@@ -704,48 +704,66 @@ def _extract_result_bytes(result):
     return None
 
 
-def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
-    """Edit `image_bytes` per `prompt` via the free Hugging Face editing Space.
+def _call_edit_space(space_id: str, src_path: str, prompt: str):
+    """Run one editing Space's `/infer` and return its raw predict result.
 
-    Returns `(edited_bytes, out_mime)` on success, or None when the Space
-    returned no usable image. Raises `_EditError` with a user-facing reason on
-    any failure (library missing, Space busy / down / over quota) so the real
-    cause reaches the user instead of a generic "try again".
+    All Spaces in the default chain share this signature. Kept separate so
+    `_edit_image` can try each Space in turn and skip any that raise."""
+    from gradio_client import Client, handle_file
+
+    client = Client(space_id, hf_token=HF_TOKEN or None)
+    return client.predict(
+        input_image=handle_file(src_path),
+        prompt=prompt,
+        seed=0,
+        randomize_seed=True,
+        guidance_scale=2.5,
+        steps=28,
+        api_name="/infer",
+    )
+
+
+def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
+    """Edit `image_bytes` per `prompt` via the free Hugging Face editing Spaces.
+
+    Tries each Space in HF_EDIT_SPACE_IDS in order, moving on when one is
+    queue-full / down / rate-limited — this is what makes /edit reliable on
+    free shared GPUs. Returns `(edited_bytes, out_mime)` on success, None when a
+    Space replied but with no usable image, or raises `_EditError` (with a
+    user-facing reason) when the library is missing or EVERY Space failed.
     """
     try:
-        from gradio_client import Client, handle_file
+        import gradio_client  # noqa: F401  (import check only)
     except Exception as e:
         print(f"/edit gradio_client import failed: {e}")
         raise _EditError("image editing isn't installed on this bot.") from e
 
     ext = mimetypes.guess_extension(mime_type) or ".jpg"
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            src = os.path.join(tmp, f"input{ext}")
-            with open(src, "wb") as fh:
-                fh.write(image_bytes)
-            client = Client(HF_EDIT_SPACE_ID, hf_token=HF_TOKEN or None)
-            result = client.predict(
-                input_image=handle_file(src),
-                prompt=prompt,
-                seed=0,
-                randomize_seed=True,
-                guidance_scale=2.5,
-                steps=28,
-                api_name="/infer",
-            )
-    except Exception as e:
-        print(f"/edit HF Space call failed: {e}")
-        raise _EditError(
-            "the free image editor is busy or unavailable right now — "
-            "please try again in a minute."
-        ) from e
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, f"input{ext}")
+        with open(src, "wb") as fh:
+            fh.write(image_bytes)
 
-    extracted = _extract_result_bytes(result)
-    if extracted is None:
-        print(f"/edit HF Space returned no usable image: {result!r}")
-        return None
-    return _normalize_for_telegram(*extracted)
+        last_error = None
+        for space_id in HF_EDIT_SPACE_IDS:
+            try:
+                result = _call_edit_space(space_id, src, prompt)
+            except Exception as e:
+                # Busy / queue-full / down / quota — try the next Space.
+                print(f"/edit Space {space_id!r} failed, trying next: {e}")
+                last_error = e
+                continue
+            extracted = _extract_result_bytes(result)
+            if extracted is None:
+                print(f"/edit Space {space_id!r} returned no usable image: {result!r}")
+                continue
+            return _normalize_for_telegram(*extracted)
+
+    # Every Space in the chain was unavailable.
+    print(f"/edit: all Spaces failed ({len(HF_EDIT_SPACE_IDS)} tried); last: {last_error}")
+    raise _EditError(
+        "the free image editors are all busy right now — please try again in a minute."
+    )
 
 
 def _send_edited_image(message, data: bytes, out_mime: str, prompt: str) -> None:
