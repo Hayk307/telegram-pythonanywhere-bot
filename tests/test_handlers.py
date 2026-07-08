@@ -856,6 +856,7 @@ def test_cmd_edit_reply_path_edits_and_sends_photo():
         patch("bot.handlers._edit_image", return_value=b"\xff\xd8edited") as mock_edit,
     ):
         _patch_edit_typing(mock_keep)
+        mock_edit.return_value = (b"\xff\xd8edited", "image/png")
         mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
         mock_bot.download_file.return_value = b"src-bytes"
 
@@ -878,7 +879,10 @@ def test_handle_file_caption_edit_path_edits_photo():
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
         patch("bot.handlers.GEMINI_API_KEY", "key"),
-        patch("bot.handlers._edit_image", return_value=b"\xff\xd8edited") as mock_edit,
+        patch(
+            "bot.handlers._edit_image",
+            return_value=(b"\xff\xd8edited", "image/png"),
+        ) as mock_edit,
         patch("bot.handlers.fileconvert.convert") as mock_convert,
     ):
         _patch_edit_typing(mock_keep)
@@ -939,7 +943,7 @@ def test_edit_image_posts_to_gemini_and_decodes_result():
 
     reply_bytes = b"\xff\xd8\xff-new-image"
     fake_response = MagicMock()
-    fake_response.raise_for_status = MagicMock()
+    fake_response.status_code = 200
     fake_response.json.return_value = {
         "candidates": [
             {
@@ -963,8 +967,9 @@ def test_edit_image_posts_to_gemini_and_decodes_result():
     ):
         from bot.handlers import _edit_image
 
-        out = _edit_image("make it snowy", b"src", "image/jpeg")
-        assert out == reply_bytes
+        out_bytes, out_mime = _edit_image("make it snowy", b"src", "image/jpeg")
+        assert out_bytes == reply_bytes
+        assert out_mime == "image/png"
         # The source image was sent inline as base64 in the request body.
         sent = mock_post.call_args.kwargs["json"]
         parts = sent["contents"][0]["parts"]
@@ -975,7 +980,7 @@ def test_edit_image_posts_to_gemini_and_decodes_result():
 def test_edit_image_returns_none_when_no_image_in_response():
     """A text-only / safety-blocked response yields None (caller shows an error)."""
     fake_response = MagicMock()
-    fake_response.raise_for_status = MagicMock()
+    fake_response.status_code = 200
     fake_response.json.return_value = {
         "candidates": [{"content": {"parts": [{"text": "I can't edit that."}]}}]
     }
@@ -988,6 +993,28 @@ def test_edit_image_returns_none_when_no_image_in_response():
         assert _edit_image("do something", b"src") is None
 
 
+def test_edit_image_raises_editerror_on_api_error():
+    """An HTTP error (bad key, no model access, quota) surfaces the real reason."""
+    from bot.handlers import _EditError
+
+    fake_response = MagicMock()
+    fake_response.status_code = 400
+    fake_response.json.return_value = {
+        "error": {"message": "API key not valid. Please pass a valid API key."}
+    }
+    with (
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers.requests.post", return_value=fake_response),
+    ):
+        from bot.handlers import _edit_image
+
+        try:
+            _edit_image("x", b"src")
+            assert False, "expected _EditError"
+        except _EditError as e:
+            assert "API key not valid" in str(e)
+
+
 def test_edit_image_returns_none_without_key():
     """No key configured → no network call, returns None."""
     with (
@@ -998,3 +1025,68 @@ def test_edit_image_returns_none_without_key():
 
         assert _edit_image("x", b"src") is None
         mock_post.assert_not_called()
+
+
+def test_run_edit_surfaces_edit_error_reason():
+    """A _EditError from the API is shown to the user verbatim, not a vague msg."""
+    from bot.handlers import _EditError
+
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch(
+            "bot.handlers._edit_image",
+            side_effect=_EditError("the image service rejected the request (bad key)."),
+        ),
+    ):
+        _patch_edit_typing(mock_keep)
+        mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
+        mock_bot.download_file.return_value = b"src"
+
+        from bot.handlers import _run_edit
+
+        _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
+        sent = mock_bot.send_message.call_args[0][1]
+        assert "bad key" in sent
+        mock_bot.send_photo.assert_not_called()
+
+
+def test_run_edit_falls_back_to_document_when_photo_rejected():
+    """If Telegram rejects the edited bytes as a photo, we still deliver it as a file."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch(
+            "bot.handlers._edit_image",
+            return_value=(b"\x89PNG-edited", "image/png"),
+        ),
+    ):
+        _patch_edit_typing(mock_keep)
+        mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
+        mock_bot.download_file.return_value = b"src"
+        mock_bot.send_photo.side_effect = Exception("PHOTO_INVALID_DIMENSIONS")
+
+        from bot.handlers import _run_edit
+
+        _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
+        mock_bot.send_photo.assert_called_once()
+        mock_bot.send_document.assert_called_once()
+        assert mock_bot.send_document.call_args[0][1] == b"\x89PNG-edited"
+
+
+def test_run_edit_reports_download_failure():
+    """A failed Telegram download tells the user to resend, never calls the API."""
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.GEMINI_API_KEY", "key"),
+        patch("bot.handlers._edit_image") as mock_edit,
+    ):
+        mock_bot.get_file.side_effect = Exception("file too big")
+
+        from bot.handlers import _run_edit
+
+        _run_edit(make_photo_message(), "PHOTOID", "make it snowy")
+        mock_edit.assert_not_called()
+        assert "resend" in mock_bot.send_message.call_args[0][1].lower()

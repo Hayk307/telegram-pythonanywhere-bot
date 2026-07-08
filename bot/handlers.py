@@ -659,27 +659,41 @@ def _photo_file_id(msg):
     return None
 
 
+class _EditError(Exception):
+    """A /edit failure with a user-facing reason (shown after 'Couldn't edit
+    that image — '). Raised by `_edit_image` so `_run_edit` can tell the user
+    *why* (bad key, no model access, quota, etc.) instead of a vague message."""
+
+
+def _gemini_error_detail(resp) -> str:
+    """Pull the human-readable reason out of a Gemini error response body."""
+    try:
+        return (resp.json().get("error") or {}).get("message") or resp.text[:200]
+    except Exception:
+        return (resp.text or "")[:200] or f"HTTP {resp.status_code}"
+
+
 def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
     """Edit `image_bytes` per `prompt` via Gemini's image model.
 
-    Returns the edited image's bytes, or None on any failure (unset key,
-    network/HTTP error, or a response that carries no image — e.g. the model
-    replied with a safety refusal instead of an image). The source image is
-    sent inline as base64; the edited image comes back the same way.
+    Returns `(edited_bytes, out_mime)` on success, or None when the model
+    returned no image (e.g. a safety block or a text-only reply — the caller
+    turns that into a "try a different prompt" message). Raises `_EditError`
+    with a user-facing reason on a configuration / API / transport failure so
+    the real cause reaches the user instead of a generic "try again".
     """
     if not GEMINI_API_KEY:
         return None
+    try:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+    except Exception as e:
+        raise _EditError("I couldn't read that image file.") from e
     payload = {
         "contents": [
             {
                 "parts": [
                     {"text": prompt},
-                    {
-                        "inlineData": {
-                            "mimeType": mime_type,
-                            "data": base64.b64encode(image_bytes).decode("ascii"),
-                        }
-                    },
+                    {"inlineData": {"mimeType": mime_type, "data": encoded}},
                 ]
             }
         ],
@@ -694,20 +708,58 @@ def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
             json=payload,
             timeout=IMAGE_TIMEOUT,
         )
-        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"/edit Gemini request failed: {e}")
+        raise _EditError("the image service didn't respond — try again shortly.") from e
+
+    if resp.status_code != 200:
+        detail = _gemini_error_detail(resp)
+        print(f"/edit Gemini HTTP {resp.status_code}: {detail}")
+        raise _EditError(f"the image service rejected the request ({detail}).")
+
+    try:
         data = resp.json()
-        for cand in data.get("candidates") or []:
-            for part in (cand.get("content") or {}).get("parts") or []:
-                inline = part.get("inlineData") or part.get("inline_data")
-                if inline and inline.get("data"):
-                    return base64.b64decode(inline["data"])
-        # No image part — usually a safety block or a text-only reply. Log a
-        # short slice of the response so the reason is visible in the console.
-        print(f"/edit: Gemini returned no image. Response: {json.dumps(data)[:500]}")
-        return None
+    except ValueError as e:
+        print(f"/edit Gemini returned non-JSON: {resp.text[:200]!r}")
+        raise _EditError("the image service returned an unreadable response.") from e
+
+    for cand in data.get("candidates") or []:
+        for part in (cand.get("content") or {}).get("parts") or []:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                out_mime = (
+                    inline.get("mimeType") or inline.get("mime_type") or "image/png"
+                )
+                try:
+                    return base64.b64decode(inline["data"]), out_mime
+                except Exception as e:
+                    print(f"/edit could not decode returned image: {e}")
+                    raise _EditError("the edited image came back corrupted.") from e
+
+    # No image part — usually a safety block or a text-only reply. Log the
+    # response so the reason is visible in the console.
+    print(f"/edit: Gemini returned no image. Response: {json.dumps(data)[:500]}")
+    return None
+
+
+def _send_edited_image(message, data: bytes, out_mime: str, prompt: str) -> None:
+    """Send the edited image back, guaranteeing delivery.
+
+    Tries `send_photo` first (renders inline). If Telegram rejects the bytes
+    as a photo — some formats/dimensions aren't accepted on the photo
+    endpoint — we fall back to `send_document`, which accepts any bytes, so
+    the user still gets their edited image instead of an error.
+    """
+    caption = f"✏️ {_clip_caption(prompt)}"
+    try:
+        bot.send_photo(message.chat.id, data, caption=caption)
     except Exception as e:
-        print(f"/edit Gemini call failed: {e}")
-        return None
+        print(f"/edit send_photo failed ({e}); retrying as a document")
+        ext = mimetypes.guess_extension(out_mime) or ".png"
+        bot.send_document(
+            message.chat.id, data, visible_file_name=f"edited{ext}", caption=caption
+        )
+    _log(message, "out", f"[edited image] {prompt}")
 
 
 def _run_edit(message, file_id: str, prompt: str) -> None:
@@ -720,28 +772,54 @@ def _run_edit(message, file_id: str, prompt: str) -> None:
             "enabled) to turn it on.",
         )
         return
+
+    # 1. Download the source photo from Telegram.
+    try:
+        info = bot.get_file(file_id)
+        image_bytes = bot.download_file(info.file_path)
+        mime = mimetypes.guess_type(info.file_path or "")[0] or "image/jpeg"
+        if not mime.startswith("image/"):
+            mime = "image/jpeg"
+    except Exception as e:
+        print(f"/edit download failed: {e}")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ I couldn't fetch that photo from Telegram. Please resend it and try again.",
+        )
+        return
+
+    # 2. Edit it (the slow call — keep the typing indicator alive).
     try:
         with keep_typing(message.chat.id):
-            info = bot.get_file(file_id)
-            image_bytes = bot.download_file(info.file_path)
-            mime = mimetypes.guess_type(info.file_path or "")[0] or "image/jpeg"
-            if not mime.startswith("image/"):
-                mime = "image/jpeg"
-            data = _edit_image(prompt, image_bytes, mime)
-        if data is None:
-            bot.send_message(
-                message.chat.id,
-                "⚠️ Couldn't edit that image right now. It may have been blocked "
-                "or the service was busy — please try a different prompt or image.",
-            )
-            return
-        bot.send_photo(message.chat.id, data, caption=f"✏️ {_clip_caption(prompt)}")
-        _log(message, "out", f"[edited image] {prompt}")
+            result = _edit_image(prompt, image_bytes, mime)
+    except _EditError as e:
+        bot.send_message(message.chat.id, f"⚠️ Couldn't edit that image — {e}")
+        return
     except Exception as e:
-        print(f"/edit failed: {e}")
+        print(f"/edit unexpected error during edit: {e}")
         bot.send_message(
             message.chat.id,
             "⚠️ Couldn't edit that image right now. Please try again in a moment.",
+        )
+        return
+
+    if result is None:
+        bot.send_message(
+            message.chat.id,
+            "⚠️ The model didn't return an image — your request may have been "
+            "blocked. Try rewording the edit or using a different photo.",
+        )
+        return
+
+    # 3. Send the edited image back (guaranteed delivery via document fallback).
+    edited_bytes, out_mime = result
+    try:
+        _send_edited_image(message, edited_bytes, out_mime, prompt)
+    except Exception as e:
+        print(f"/edit send failed: {e}")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ I edited your image but couldn't send it back. Please try again.",
         )
 
 
