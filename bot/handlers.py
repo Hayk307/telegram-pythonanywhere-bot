@@ -13,8 +13,6 @@ from pyexpat.errors import messages
 from bot.clients import bot, BOT_INFO, store
 from bot.config import (
     COMMIT_SHA,
-    GOOGLE_API_KEY,
-    GOOGLE_CSE_ID,
     HF_EDIT_SPACE_IDS,
     HF_SPACE_ID,
     HF_TOKEN,
@@ -109,8 +107,8 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
-        "🌀 /image — Real photo of a real subject, or a generated one: /image Eiffel Tower",
-        "✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
+        "🌀 /image — Generate an image from a prompt: /image a neon cat on a skateboard",
+        #"✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -342,112 +340,36 @@ def cmd_explain(message):
 
 
 
-# /image — smart image command. It first asks the AI to classify the request:
-#   • REAL subject (an identifiable person, place, or thing that has actual
-#     photographs — "Albert Einstein", "Eiffel Tower") → retrieve a real photo
-#     from the internet and send that.
-#   • CREATIVE brief (something imaginary to be made — "a dragon on a
-#     skateboard", "watercolor mountains") → GENERATE it with Pollinations
-#     (image.pollinations.ai), a free, no-API-key text-to-image service.
+# /image — generate a brand-new image from a text prompt via Pollinations AI
+# (image.pollinations.ai), a 100% free, no-API-key text-to-image service. Every
+# /image call generates; there is no real-photo lookup. A failed generation
+# ends in a friendly message rather than an exception.
 #
-# Real-photo retrieval tries, in order: (1) a general web image search via
-# Google Programmable Search when GOOGLE_API_KEY + GOOGLE_CSE_ID are set —
-# broad coverage of arbitrary real subjects; (2) Wikipedia's lead image — no
-# key needed, great for famous subjects. If neither finds a usable photo we
-# fall through to generation. Every step degrades gracefully: a failed
-# classification, a missing photo, or an SVG/non-raster result all fall through
-# to generation, and a failed generation ends in a friendly error rather than
-# an exception.
-#
-# NOTE for PythonAnywhere: none of image.pollinations.ai, en.wikipedia.org,
-# upload.wikimedia.org, or www.googleapis.com (web search) are on the free-tier
-# outbound whitelist by default — request them on the PA forum, or /image will
+# NOTE for PythonAnywhere: image.pollinations.ai is not on the free-tier
+# outbound whitelist by default — request it on the PA forum, or /image will
 # time out in production while still working locally.
 POLLINATIONS_ENDPOINT = "https://image.pollinations.ai/prompt/"
-WIKI_API = "https://en.wikipedia.org/w/api.php"
-GOOGLE_SEARCH_API = "https://www.googleapis.com/customsearch/v1"
 IMAGE_TIMEOUT = 90  # seconds — Pollinations can be slow under load
-WIKI_TIMEOUT = 15  # seconds — Wikipedia is fast; fail over to generation quickly
-SEARCH_TIMEOUT = 15  # seconds — web image search + download
+SEARCH_TIMEOUT = 15  # seconds — used by _download_image (result fetch for /edit)
 IMAGE_WIDTH = 1024
 IMAGE_HEIGHT = 1024
 # Telegram caps photo captions at 1024 chars; keep well under it.
 IMAGE_CAPTION_LIMIT = 900
-# Wikipedia's API etiquette asks for a descriptive User-Agent; reused for all
-# outbound image fetches so hosts that block empty agents still serve us.
-WIKI_USER_AGENT = "telegram-pythonanywhere-bot/1.0 (educational Telegram bot)"
-
-
-def _classify_image_request(user_id: int, prompt: str):
-    """Ask the AI whether `prompt` is a plain depiction of a real subject or a
-    creative brief.
-
-    Returns (is_real, subject): is_real True ONLY when the prompt asks for a
-    real, identifiable subject exactly as it actually exists (a portrait/photo
-    of a person, place, or object), so a real photo can be retrieved. A
-    scenario, action, or counterfactual — even one naming real people/things
-    ("a Real Madrid player playing for Barcelona") — is a creative brief and
-    returns is_real False so the image is generated instead. `subject` is the
-    canonical name to look up on Wikipedia. Any AI/parse failure returns
-    (False, prompt) so we simply fall back to generating the image.
-    """
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a precise classifier that replies with only a JSON object.",
-        },
-        {
-            "role": "user",
-            "content": (
-                "An image bot must decide whether to RETRIEVE a real photograph "
-                "or GENERATE a new image for this request.\n\n"
-                "Set real=true ONLY when the request is a plain depiction of a "
-                "single real, identifiable subject exactly as it actually "
-                "exists — essentially a portrait or photo of that subject with "
-                "no invented action, setting, or alteration. Examples: 'Albert "
-                "Einstein', 'the Eiffel Tower', 'a photo of the Toyota "
-                "Corolla'.\n\n"
-                "Set real=false when the request describes a SCENE, ACTION, "
-                "HYPOTHETICAL, or COMBINATION that would not exist as an actual "
-                "photograph — even if it names real people, places, or things. "
-                "Examples: 'a Real Madrid player playing for Barcelona' (a "
-                "situation that isn't real), 'Einstein riding a skateboard', "
-                "'the Eiffel Tower on the moon', 'a dragon on a skateboard', "
-                "'watercolor mountains at sunrise'. When unsure, prefer "
-                "real=false (generate).\n\n"
-                'Reply with ONLY a compact JSON object: {"real": true|false, '
-                '"subject": "<if real, the subject\'s common name to search; '
-                'otherwise an empty string>"}. No other text.\n\n'
-                f"Request: {prompt}"
-            ),
-        },
-    ]
-    try:
-        raw = generate(user_id, messages).strip()
-        # Tolerate ```json fences some models wrap JSON in.
-        if raw.startswith("```"):
-            raw = raw.strip("`").strip()
-            if raw.lower().startswith("json"):
-                raw = raw[4:].strip()
-        data = json.loads(raw)
-        subject = (data.get("subject") or prompt).strip()
-        return bool(data.get("real")), subject
-    except Exception as e:
-        print(f"/image classify failed: {e}")
-        return False, prompt
+# A descriptive User-Agent so hosts that block empty agents still serve us.
+IMAGE_USER_AGENT = "telegram-pythonanywhere-bot/1.0 (educational Telegram bot)"
 
 
 def _download_image(url: str):
     """Download `url` and return its bytes if it's a raster image Telegram can
     send as a photo, else None.
 
-    Rejects non-images and SVG (logos/flags), which send_photo can't render.
-    Any network/HTTP error returns None so callers fall through to the next
-    source rather than raising.
+    Rejects non-images and SVG, which send_photo can't render. Any network /
+    HTTP error returns None so callers degrade gracefully rather than raising.
+    Used by the /edit result path when a Space returns an image URL.
     """
     try:
         resp = requests.get(
-            url, headers={"User-Agent": WIKI_USER_AGENT}, timeout=SEARCH_TIMEOUT
+            url, headers={"User-Agent": IMAGE_USER_AGENT}, timeout=SEARCH_TIMEOUT
         )
         resp.raise_for_status()
         ctype = resp.headers.get("Content-Type", "")
@@ -455,108 +377,14 @@ def _download_image(url: str):
             return None
         return resp.content
     except Exception as e:
-        print(f"/image download failed for {url!r}: {e}")
+        print(f"image download failed for {url!r}: {e}")
         return None
-
-
-def _search_web_image(subject: str):
-    """Return real-photo bytes for `subject` from a general web image search
-    via Google Programmable Search, or None.
-
-    Disabled (returns None immediately) unless both GOOGLE_API_KEY and
-    GOOGLE_CSE_ID are configured, so the bot keeps working with no key. Asks
-    for image results, then downloads the top hit; on no result / bad key /
-    network error returns None so the caller falls back to Wikipedia.
-    """
-    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID and subject):
-        return None
-    try:
-        params = {
-            "key": GOOGLE_API_KEY,
-            "cx": GOOGLE_CSE_ID,
-            "q": subject,
-            "searchType": "image",
-            "num": 1,
-            "safe": "active",
-            # Prefer large, photographic results over clip art / icons.
-            "imgSize": "large",
-            "imgType": "photo",
-        }
-        resp = requests.get(
-            GOOGLE_SEARCH_API,
-            params=params,
-            headers={"User-Agent": WIKI_USER_AGENT},
-            timeout=SEARCH_TIMEOUT,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items") or []
-        if not items:
-            return None
-        return _download_image(items[0].get("link", ""))
-    except Exception as e:
-        print(f"/image web search failed: {e}")
-        return None
-
-
-def _wikipedia_image(subject: str):
-    """Return real-photo bytes for `subject` via Wikipedia's lead image, or None.
-
-    Uses the MediaWiki pageimages API (generator=search picks the best-
-    matching page) to resolve a lead image, prefers the size-bounded
-    thumbnail over the full original, then downloads it. Returns None — so
-    the caller falls back to generation — when nothing suitable is found.
-    """
-    if not subject:
-        return None
-    try:
-        params = {
-            "action": "query",
-            "format": "json",
-            "generator": "search",
-            "gsrsearch": subject,
-            "gsrlimit": 1,
-            "prop": "pageimages",
-            "piprop": "thumbnail|original",
-            "pithumbsize": IMAGE_WIDTH,
-        }
-        meta = requests.get(
-            WIKI_API,
-            params=params,
-            headers={"User-Agent": WIKI_USER_AGENT},
-            timeout=WIKI_TIMEOUT,
-        )
-        meta.raise_for_status()
-        pages = (meta.json().get("query") or {}).get("pages") or {}
-        image_url = None
-        for page in pages.values():
-            src = (page.get("thumbnail") or {}).get("source") or (
-                page.get("original") or {}
-            ).get("source")
-            if src:
-                image_url = src
-                break
-        if not image_url:
-            return None
-        return _download_image(image_url)
-    except Exception as e:
-        print(f"/image Wikipedia lookup failed: {e}")
-        return None
-
-
-def _fetch_real_photo(subject: str):
-    """Return real-photo bytes for `subject`, trying the broadest source first.
-
-    Order: general web image search (Google Programmable Search, when
-    configured) → Wikipedia lead image. Returns None if neither yields a
-    usable photo, so the caller generates the image instead.
-    """
-    return _search_web_image(subject) or _wikipedia_image(subject)
 
 
 def _generate_image(prompt: str):
     """Generate an image from a free-form prompt via Pollinations.
 
-    Returns JPEG bytes, or None on any failure. safe="" percent-encodes the
+    Returns image bytes, or None on any failure. safe="" percent-encodes the
     whole prompt into the single path segment Pollinations expects.
     """
     url = POLLINATIONS_ENDPOINT + quote(prompt, safe="")
@@ -583,29 +411,21 @@ def cmd_image(message):
     if not prompt:
         bot.send_message(
             message.chat.id,
-            "🌀 Usage: /image <a real subject or something to create>\n\n"
+            "🌀 Usage: /image <describe what to create>\n\n"
             "Examples:\n"
-            "📷 /image Eiffel Tower — I'll send a real photo\n"
-            "📷 /image Albert Einstein — a real photo\n"
-            "🌀 /image a neon cyberpunk cat on a skateboard — I'll generate it\n\n"
-            "Real people and things get a real photo; imaginary ideas I create. ✨",
+            "🌀 /image a neon cyberpunk cat on a skateboard\n"
+            "🌀 /image watercolor mountains at sunrise\n"
+            "🌀 /image a cozy cabin in a snowy forest, digital art\n\n"
+            "I'll generate a brand-new image from your description. ✨",
         )
         return
     try:
         with keep_typing(message.chat.id):
-            is_real, subject = _classify_image_request(message.from_user.id, prompt)
-            photo = _fetch_real_photo(subject) if is_real else None
-            if photo is not None:
-                bot.send_photo(
-                    message.chat.id, photo, caption=f"📷 {_clip_caption(subject)}"
-                )
-                _log(message, "out", f"[real photo] {subject}")
-                return
             data = _generate_image(prompt)
         if data is None:
             bot.send_message(
                 message.chat.id,
-                "⚠️ Couldn't get that image right now. Please try again in a moment.",
+                "⚠️ Couldn't generate that image right now. Please try again in a moment.",
             )
             return
         bot.send_photo(message.chat.id, data, caption=f"🌀 {_clip_caption(prompt)}")
@@ -614,7 +434,7 @@ def cmd_image(message):
         print(f"/image failed: {e}")
         bot.send_message(
             message.chat.id,
-            "⚠️ Couldn't get that image right now. Please try again in a moment.",
+            "⚠️ Couldn't generate that image right now. Please try again in a moment.",
         )
 
 

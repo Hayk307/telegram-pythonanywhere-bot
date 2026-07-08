@@ -548,7 +548,7 @@ def test_handle_file_conversion_error_is_reported():
         assert "can't convert that" in mock_bot.send_message.call_args[0][1]
 
 
-# ── /image (real photo vs generated) ────────────────────────────────────────
+# ── /image (Pollinations text-to-image generation) ───────────
 
 
 def _patch_image_typing(stack_keep):
@@ -557,82 +557,35 @@ def _patch_image_typing(stack_keep):
 
 
 def test_cmd_image_no_prompt_shows_usage():
-    """/image with no description shows usage and never classifies or fetches."""
+    """/image with no description shows usage and never generates."""
     with (
         patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers._classify_image_request") as mock_classify,
         patch("bot.handlers._generate_image") as mock_gen,
     ):
         from bot.handlers import cmd_image
 
         cmd_image(make_message(text="/image"))
-        mock_classify.assert_not_called()
         mock_gen.assert_not_called()
         assert "Usage" in mock_bot.send_message.call_args[0][1]
 
 
-def test_cmd_image_real_subject_sends_real_photo():
-    """A real subject fetches a Wikipedia photo and sends it — no generation."""
+def test_cmd_image_generates_and_sends_photo():
+    """/image <prompt> generates via Pollinations and sends the image back."""
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
         patch(
-            "bot.handlers._classify_image_request",
-            return_value=(True, "Albert Einstein"),
-        ),
-        patch(
-            "bot.handlers._fetch_real_photo", return_value=b"\xff\xd8real-photo"
-        ) as mock_fetch,
-        patch("bot.handlers._generate_image") as mock_gen,
-    ):
-        _patch_image_typing(mock_keep)
-        from bot.handlers import cmd_image
-
-        cmd_image(make_message(text="/image Albert Einstein"))
-        mock_fetch.assert_called_once_with("Albert Einstein")
-        mock_gen.assert_not_called()
-        mock_bot.send_photo.assert_called_once()
-        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8real-photo"
-        assert "Einstein" in mock_bot.send_photo.call_args.kwargs["caption"]
-
-
-def test_cmd_image_creative_prompt_generates():
-    """A creative prompt skips the photo lookup and generates the image."""
-    with (
-        patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers._classify_image_request", return_value=(False, "")),
-        patch("bot.handlers._fetch_real_photo") as mock_fetch,
-        patch(
-            "bot.handlers._generate_image", return_value=b"\xff\xd8generated"
+            "bot.handlers._generate_image", return_value=b"generated-bytes"
         ) as mock_gen,
     ):
         _patch_image_typing(mock_keep)
         from bot.handlers import cmd_image
 
         cmd_image(make_message(text="/image a dragon on a skateboard"))
-        mock_fetch.assert_not_called()
         mock_gen.assert_called_once_with("a dragon on a skateboard")
-        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8generated"
-
-
-def test_cmd_image_real_but_no_photo_falls_back_to_generate():
-    """Real subject with no usable Wikipedia photo falls back to generation."""
-    with (
-        patch("bot.handlers.bot") as mock_bot,
-        patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers._classify_image_request", return_value=(True, "Obscure")),
-        patch("bot.handlers._fetch_real_photo", return_value=None),
-        patch(
-            "bot.handlers._generate_image", return_value=b"\xff\xd8generated"
-        ) as mock_gen,
-    ):
-        _patch_image_typing(mock_keep)
-        from bot.handlers import cmd_image
-
-        cmd_image(make_message(text="/image Obscure"))
-        mock_gen.assert_called_once_with("Obscure")
-        assert mock_bot.send_photo.call_args[0][1] == b"\xff\xd8generated"
+        mock_bot.send_photo.assert_called_once()
+        assert mock_bot.send_photo.call_args[0][1] == b"generated-bytes"
+        assert "dragon" in mock_bot.send_photo.call_args.kwargs["caption"]
 
 
 def test_cmd_image_generation_failure_reports_error():
@@ -640,7 +593,6 @@ def test_cmd_image_generation_failure_reports_error():
     with (
         patch("bot.handlers.bot") as mock_bot,
         patch("bot.handlers.keep_typing") as mock_keep,
-        patch("bot.handlers._classify_image_request", return_value=(False, "")),
         patch("bot.handlers._generate_image", return_value=None),
     ):
         _patch_image_typing(mock_keep)
@@ -648,171 +600,65 @@ def test_cmd_image_generation_failure_reports_error():
 
         cmd_image(make_message(text="/image something"))
         mock_bot.send_photo.assert_not_called()
-        assert "Couldn't get that image" in mock_bot.send_message.call_args[0][1]
+        assert "Couldn't generate" in mock_bot.send_message.call_args[0][1]
 
 
-# ── /image helpers ──────────────────────────────────────────────────────────
+# ── /image helpers ───────────
 
 
-def test_classify_image_request_parses_json():
-    with patch(
-        "bot.handlers.generate",
-        return_value='{"real": true, "subject": "Eiffel Tower"}',
-    ):
-        from bot.handlers import _classify_image_request
+def test_generate_image_calls_pollinations_and_returns_bytes():
+    """_generate_image builds the Pollinations URL and returns the image bytes."""
+    fake = MagicMock()
+    fake.raise_for_status = MagicMock()
+    fake.headers = {"Content-Type": "image/jpeg"}
+    fake.content = b"img-bytes"
+    with patch("bot.handlers.requests.get", return_value=fake) as mock_get:
+        from bot.handlers import _generate_image
 
-        is_real, subject = _classify_image_request(123, "the eiffel tower")
-        assert is_real is True
-        assert subject == "Eiffel Tower"
-
-
-def test_classify_image_request_strips_code_fence():
-    with patch(
-        "bot.handlers.generate",
-        return_value='```json\n{"real": false, "subject": ""}\n```',
-    ):
-        from bot.handlers import _classify_image_request
-
-        is_real, subject = _classify_image_request(123, "a flying whale")
-        assert is_real is False
-        # empty subject falls back to the original prompt
-        assert subject == "a flying whale"
+        assert _generate_image("a red fox") == b"img-bytes"
+        url = mock_get.call_args[0][0]
+        assert url.startswith("https://image.pollinations.ai/prompt/")
+        assert "a%20red%20fox" in url
 
 
-def test_classify_image_request_bad_output_defaults_to_generate():
-    """Unparseable AI output must degrade to (False, prompt) — never raise."""
-    with patch("bot.handlers.generate", return_value="I think that's real!"):
-        from bot.handlers import _classify_image_request
+def test_generate_image_returns_none_on_error():
+    """A network/HTTP error yields None (caller shows a friendly message)."""
+    with patch("bot.handlers.requests.get", side_effect=Exception("boom")):
+        from bot.handlers import _generate_image
 
-        assert _classify_image_request(123, "mystery") == (False, "mystery")
-
-
-def test_fetch_real_photo_returns_image_bytes():
-    """pageimages lookup resolves a thumbnail, which is then downloaded."""
-    meta = MagicMock()
-    meta.raise_for_status = MagicMock()
-    meta.json.return_value = {
-        "query": {
-            "pages": {
-                "736": {"thumbnail": {"source": "https://upload.wikimedia.org/x.jpg"}}
-            }
-        }
-    }
-    img = MagicMock()
-    img.raise_for_status = MagicMock()
-    img.headers = {"Content-Type": "image/jpeg"}
-    img.content = b"\xff\xd8photo"
-    with patch("bot.handlers.requests") as mock_requests:
-        mock_requests.get.side_effect = [meta, img]
-        from bot.handlers import _fetch_real_photo
-
-        assert _fetch_real_photo("Einstein") == b"\xff\xd8photo"
+        assert _generate_image("x") is None
 
 
-def test_fetch_real_photo_none_when_no_image():
-    """A page with no lead image returns None so the caller generates instead."""
-    meta = MagicMock()
-    meta.raise_for_status = MagicMock()
-    meta.json.return_value = {"query": {"pages": {"1": {"title": "X"}}}}
-    with patch("bot.handlers.requests") as mock_requests:
-        mock_requests.get.return_value = meta
-        from bot.handlers import _fetch_real_photo
+def test_generate_image_rejects_non_image_response():
+    """A non-image content-type (e.g. an error page) yields None."""
+    fake = MagicMock()
+    fake.raise_for_status = MagicMock()
+    fake.headers = {"Content-Type": "application/json"}
+    fake.content = b'{"error":"busy"}'
+    with patch("bot.handlers.requests.get", return_value=fake):
+        from bot.handlers import _generate_image
 
-        assert _fetch_real_photo("nothing") is None
-
-
-def test_fetch_real_photo_rejects_svg():
-    """SVG results (logos/flags) aren't sendable as a photo → None."""
-    meta = MagicMock()
-    meta.raise_for_status = MagicMock()
-    meta.json.return_value = {
-        "query": {
-            "pages": {"1": {"thumbnail": {"source": "https://upload.wikimedia.org/f.svg"}}}
-        }
-    }
-    img = MagicMock()
-    img.raise_for_status = MagicMock()
-    img.headers = {"Content-Type": "image/svg+xml"}
-    img.content = b"<svg/>"
-    with patch("bot.handlers.requests") as mock_requests:
-        mock_requests.get.side_effect = [meta, img]
-        from bot.handlers import _wikipedia_image
-
-        assert _wikipedia_image("some flag") is None
+        assert _generate_image("x") is None
 
 
-def test_search_web_image_disabled_without_keys():
-    """With no Google credentials the web search is a no-op (returns None,
-    never touches the network) so the bot works key-free."""
-    with (
-        patch("bot.handlers.GOOGLE_API_KEY", ""),
-        patch("bot.handlers.GOOGLE_CSE_ID", ""),
-        patch("bot.handlers.requests") as mock_requests,
-    ):
-        from bot.handlers import _search_web_image
+def test_download_image_returns_bytes_and_rejects_svg():
+    """_download_image (used by the /edit result path) accepts rasters, rejects SVG."""
+    ok = MagicMock()
+    ok.raise_for_status = MagicMock()
+    ok.headers = {"Content-Type": "image/png"}
+    ok.content = b"PNGDATA"
+    svg = MagicMock()
+    svg.raise_for_status = MagicMock()
+    svg.headers = {"Content-Type": "image/svg+xml"}
+    svg.content = b"<svg/>"
+    with patch("bot.handlers.requests.get", return_value=ok):
+        from bot.handlers import _download_image
 
-        assert _search_web_image("Eiffel Tower") is None
-        mock_requests.get.assert_not_called()
+        assert _download_image("http://x/a.png") == b"PNGDATA"
+    with patch("bot.handlers.requests.get", return_value=svg):
+        from bot.handlers import _download_image
 
-
-def test_search_web_image_returns_bytes():
-    """When configured, it queries CSE and downloads the top image result."""
-    search = MagicMock()
-    search.raise_for_status = MagicMock()
-    search.json.return_value = {"items": [{"link": "https://cdn.example/x.jpg"}]}
-    img = MagicMock()
-    img.raise_for_status = MagicMock()
-    img.headers = {"Content-Type": "image/jpeg"}
-    img.content = b"\xff\xd8web-photo"
-    with (
-        patch("bot.handlers.GOOGLE_API_KEY", "key"),
-        patch("bot.handlers.GOOGLE_CSE_ID", "cx"),
-        patch("bot.handlers.requests") as mock_requests,
-    ):
-        mock_requests.get.side_effect = [search, img]
-        from bot.handlers import _search_web_image
-
-        assert _search_web_image("Eiffel Tower") == b"\xff\xd8web-photo"
-        # first call is the search endpoint
-        assert "customsearch" in mock_requests.get.call_args_list[0][0][0]
-
-
-def test_search_web_image_no_results_returns_none():
-    search = MagicMock()
-    search.raise_for_status = MagicMock()
-    search.json.return_value = {"items": []}
-    with (
-        patch("bot.handlers.GOOGLE_API_KEY", "key"),
-        patch("bot.handlers.GOOGLE_CSE_ID", "cx"),
-        patch("bot.handlers.requests") as mock_requests,
-    ):
-        mock_requests.get.return_value = search
-        from bot.handlers import _search_web_image
-
-        assert _search_web_image("nonexistent thing") is None
-
-
-def test_fetch_real_photo_prefers_web_over_wikipedia():
-    """Web search wins when it returns a photo — Wikipedia isn't consulted."""
-    with (
-        patch("bot.handlers._search_web_image", return_value=b"\xff\xd8web"),
-        patch("bot.handlers._wikipedia_image") as mock_wiki,
-    ):
-        from bot.handlers import _fetch_real_photo
-
-        assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8web"
-        mock_wiki.assert_not_called()
-
-
-def test_fetch_real_photo_falls_back_to_wikipedia():
-    """When web search yields nothing, Wikipedia is the fallback source."""
-    with (
-        patch("bot.handlers._search_web_image", return_value=None),
-        patch("bot.handlers._wikipedia_image", return_value=b"\xff\xd8wiki"),
-    ):
-        from bot.handlers import _fetch_real_photo
-
-        assert _fetch_real_photo("Eiffel Tower") == b"\xff\xd8wiki"
+        assert _download_image("http://x/a.svg") is None
 
 
 # ── /edit (free Hugging Face Space image editing) ────────────────────────────
