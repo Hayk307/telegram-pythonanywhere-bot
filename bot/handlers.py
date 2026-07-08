@@ -108,6 +108,7 @@ def cmd_help(message):
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
         "🌀 /image — Real photo of a real subject, or a generated one: /image Eiffel Tower",
+        "✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -615,6 +616,121 @@ def cmd_image(message):
         )
 
 
+# /edit — image-to-image editing. The user supplies a photo (either by replying
+# to one with `/edit <prompt>`, or by sending a photo captioned `/edit <prompt>`)
+# and a text prompt describing the change ("make it winter", "turn into a
+# watercolor"). We hand the source photo plus the prompt to Pollinations' free
+# `kontext` model (Flux Kontext), which does prompt-guided editing with no API
+# key — the same no-key service /image already uses for generation.
+#
+# Pollinations' image-to-image only accepts the source image as a *URL*, so we
+# pass Telegram's own file URL. HEADS UP: that URL embeds the bot token
+# (…/file/bot<TOKEN>/<path>), so this hands the token to Pollinations (and any
+# intermediary that logs the fetch). That's an acceptable trade-off for a
+# free, teaching-oriented template, but don't copy this pattern into anything
+# where the token is sensitive — host the image elsewhere and pass that URL.
+#
+# Same PA whitelist caveat as /image applies: image.pollinations.ai is not on
+# the free-tier outbound whitelist by default.
+EDIT_MODEL = "kontext"
+
+
+def _telegram_file_url(file_id: str) -> str:
+    """Resolve a Telegram file_id to a publicly fetchable download URL.
+
+    The URL embeds the bot token (see the /edit note above) — only use it for
+    a trusted downstream fetch.
+    """
+    info = bot.get_file(file_id)
+    return f"https://api.telegram.org/file/bot{bot.token}/{info.file_path}"
+
+
+def _photo_file_id(msg):
+    """Return the file_id of the largest photo (or image document) on `msg`,
+    or None if the message carries no usable image."""
+    if msg is None:
+        return None
+    if getattr(msg, "photo", None):
+        # photo is a list of sizes; the last one is the largest.
+        return msg.photo[-1].file_id
+    doc = getattr(msg, "document", None)
+    if doc and (getattr(doc, "mime_type", "") or "").startswith("image/"):
+        return doc.file_id
+    return None
+
+
+def _edit_image(prompt: str, image_url: str):
+    """Edit the image at `image_url` per `prompt` via Pollinations' kontext model.
+
+    Returns image bytes, or None on any failure. safe="" percent-encodes the
+    whole prompt into the single path segment Pollinations expects; the source
+    image is passed as the `image` query parameter.
+    """
+    url = POLLINATIONS_ENDPOINT + quote(prompt, safe="")
+    params = {"model": EDIT_MODEL, "image": image_url, "nologo": "true"}
+    try:
+        resp = requests.get(url, params=params, timeout=IMAGE_TIMEOUT)
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "")
+        if not ctype.startswith("image/") or not resp.content:
+            raise ValueError(f"unexpected response ({ctype or 'no content-type'})")
+        return resp.content
+    except Exception as e:
+        print(f"/edit failed: {e}")
+        return None
+
+
+def _run_edit(message, file_id: str, prompt: str) -> None:
+    """Shared /edit worker: fetch the source photo's URL, edit it, reply."""
+    try:
+        with keep_typing(message.chat.id):
+            image_url = _telegram_file_url(file_id)
+            data = _edit_image(prompt, image_url)
+        if data is None:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ Couldn't edit that image right now. Please try again in a moment.",
+            )
+            return
+        bot.send_photo(message.chat.id, data, caption=f"✏️ {_clip_caption(prompt)}")
+        _log(message, "out", f"[edited image] {prompt}")
+    except Exception as e:
+        print(f"/edit failed: {e}")
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Couldn't edit that image right now. Please try again in a moment.",
+        )
+
+
+_EDIT_USAGE = (
+    "✏️ Usage: send me a photo and edit it with a prompt.\n\n"
+    "Two ways:\n"
+    "1️⃣ Send a photo with the caption: /edit make it look like winter\n"
+    "2️⃣ Reply to a photo with: /edit turn it into a watercolor painting\n\n"
+    "I'll apply your change and send the edited image back. 🎨"
+)
+
+
+@bot.message_handler(commands=["edit"], func=is_allowed)
+def cmd_edit(message):
+    prompt = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    # The photo must come from the message being replied to (a bare /edit
+    # command has no image of its own — the caption path is handled in
+    # handle_file, where the photo and its /edit caption arrive together).
+    file_id = _photo_file_id(getattr(message, "reply_to_message", None))
+    if file_id is None:
+        bot.send_message(
+            message.chat.id,
+            "✏️ I need a photo to edit. Reply to one with /edit <prompt>, or "
+            "send a photo captioned /edit <prompt>.\n\n" + _EDIT_USAGE,
+        )
+        return
+    if not prompt:
+        bot.send_message(message.chat.id, _EDIT_USAGE)
+        return
+    _run_edit(message, file_id, prompt)
+
+
 def _load_notes(user_id: int) -> list:
     """Return the user's saved notes as a list, or [] on any failure.
 
@@ -856,6 +972,20 @@ def _incoming_file(message):
 
 @bot.message_handler(content_types=FILE_CONTENT_TYPES, func=is_allowed)
 def handle_file(message):
+    # A photo captioned `/edit <prompt>` is an image edit request, not a file
+    # conversion. Command handlers only match message.text, and a photo's text
+    # lives in message.caption, so we route it here before the convert flow.
+    caption = (message.caption or "").strip()
+    if caption.startswith("/edit"):
+        photo_id = _photo_file_id(message)
+        if photo_id is not None:
+            prompt = caption.split(maxsplit=1)[1].strip() if " " in caption else ""
+            if not prompt:
+                bot.send_message(message.chat.id, _EDIT_USAGE)
+                return
+            _run_edit(message, photo_id, prompt)
+            return
+
     file_id, file_name, file_size = _incoming_file(message)
     if file_id is None:
         return
