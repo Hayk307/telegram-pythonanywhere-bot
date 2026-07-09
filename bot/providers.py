@@ -77,7 +77,7 @@ def _call_hf(messages: list) -> str:
     # timeout — without it, dedupe pre-claim would silently swallow retries.
     client = Client(
         HF_SPACE_ID,
-        hf_token=HF_TOKEN or None,
+        token=HF_TOKEN or None,
         httpx_kwargs={"timeout": HF_REQUEST_TIMEOUT},
     )
     result = client.predict(

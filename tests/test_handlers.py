@@ -787,11 +787,11 @@ def test_edit_image_calls_hf_space_and_returns_bytes(tmp_path):
 
 
 def test_edit_image_raises_editerror_when_all_spaces_fail():
-    """When every Space in the fallback chain errors, a clear reason is raised."""
+    """A generic (non-quota) failure across the chain yields the 'busy' reason."""
     from bot.handlers import _EditError
 
     fake_client = MagicMock()
-    fake_client.predict.side_effect = Exception("GPU quota exceeded")
+    fake_client.predict.side_effect = Exception("Queue full (50/50)")
     with patch("gradio_client.Client", return_value=fake_client):
         from bot.handlers import _edit_image
 
@@ -800,6 +800,26 @@ def test_edit_image_raises_editerror_when_all_spaces_fail():
             assert False, "expected _EditError"
         except _EditError as e:
             assert "busy" in str(e)
+
+
+def test_edit_image_quota_error_points_to_hf_token():
+    """A ZeroGPU quota failure surfaces the actionable HF_TOKEN guidance
+    instead of the misleading 'all busy' message (HF_TOKEN unset in tests)."""
+    from bot.handlers import _EditError
+
+    fake_client = MagicMock()
+    fake_client.predict.side_effect = Exception(
+        "You have exceeded your ZeroGPU quota (90s requested vs. 0s left)."
+    )
+    with patch("gradio_client.Client", return_value=fake_client):
+        from bot.handlers import _edit_image
+
+        try:
+            _edit_image("x", b"src")
+            assert False, "expected _EditError"
+        except _EditError as e:
+            assert "quota" in str(e).lower()
+            assert "HF_TOKEN" in str(e)
 
 
 def test_edit_image_falls_back_to_next_space():

@@ -114,7 +114,7 @@ def test_call_hf_calls_gradio_client():
             result = _call_hf([{"role": "user", "content": "Բարև"}])
             mock_cls.assert_called_once_with(
                 "edisimon/armgpt-demo",
-                hf_token=None,
+                token=None,
                 httpx_kwargs={"timeout": HF_REQUEST_TIMEOUT},
             )
             mock_client.predict.assert_called_once()

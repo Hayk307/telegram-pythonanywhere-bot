@@ -108,7 +108,7 @@ def cmd_help(message):
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
         "🌀 /image — Generate an image from a prompt: /image a neon cat on a skateboard",
-        #"✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
+        "✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
@@ -453,7 +453,8 @@ def cmd_image(message):
 #
 # Trade-offs (all handled gracefully, surfaced to the user via _EditError):
 #   • Shared + GPU-queued, so it can be slow or briefly unavailable.
-#   • Anonymous use has a per-IP quota; set HF_TOKEN (free) to raise it.
+#   • ZeroGPU's anonymous quota is now 0s — a free HF_TOKEN is effectively
+#     required or every call fails with "exceeded your ZeroGPU quota".
 #   • On PythonAnywhere's free tier, *.hf.space must be on the outbound
 #     whitelist (huggingface.co alone isn't enough), so /edit works locally but
 #     may be blocked on PA until that domain is requested.
@@ -531,7 +532,7 @@ def _call_edit_space(space_id: str, src_path: str, prompt: str):
     `_edit_image` can try each Space in turn and skip any that raise."""
     from gradio_client import Client, handle_file
 
-    client = Client(space_id, hf_token=HF_TOKEN or None)
+    client = Client(space_id, token=HF_TOKEN or None)
     return client.predict(
         input_image=handle_file(src_path),
         prompt=prompt,
@@ -581,6 +582,21 @@ def _edit_image(prompt: str, image_bytes: bytes, mime_type: str = "image/jpeg"):
 
     # Every Space in the chain was unavailable.
     print(f"/edit: all Spaces failed ({len(HF_EDIT_SPACE_IDS)} tried); last: {last_error}")
+    # ZeroGPU quota exhaustion is the common failure now that FLUX Kontext
+    # Spaces no longer grant free GPU time to anonymous callers. Surface the
+    # real, actionable cause instead of the misleading "all busy" message —
+    # setting a free HF_TOKEN (huggingface.co/settings/tokens) raises the quota.
+    if last_error is not None and "quota" in str(last_error).lower():
+        if not HF_TOKEN:
+            raise _EditError(
+                "the free image editors are out of GPU quota for anonymous use. "
+                "The bot owner can fix this by setting a free HF_TOKEN "
+                "(huggingface.co/settings/tokens)."
+            )
+        raise _EditError(
+            "the image editor's GPU quota for this token is used up for now — "
+            "please try again later."
+        )
     raise _EditError(
         "the free image editors are all busy right now — please try again in a minute."
     )
