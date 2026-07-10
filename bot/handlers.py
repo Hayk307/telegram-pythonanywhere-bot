@@ -28,6 +28,8 @@ from bot.history import clear_history
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
 from bot import fileconvert
+from bot import slides
+from bot.providers import _call_main
 
 # Verbose console logging for local dev and teaching. Enabled by
 # BOT_VERBOSE_LOG=1 (run_local.py sets this automatically). Prints one
@@ -107,6 +109,7 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
+        "📊 /slides — Build a PowerPoint deck on any topic: /slides 15 история интернета",
         "🌀 /image — Generate an image from a prompt: /image a neon cat on a skateboard",
         #"✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
@@ -338,6 +341,102 @@ def cmd_explain(message):
         reply = ask_ai(message.from_user.id, prompt)
     send_reply(message, reply)
 
+
+# /slides — turn a topic into a clean, downloadable PowerPoint deck. The AI
+# returns a structured JSON spec (title/subtitle/slides) which bot/slides.py
+# renders into a consistently-themed .pptx. python-pptx is imported lazily
+# there, so this command degrades gracefully if the lib isn't installed yet.
+_SLIDES_SYSTEM = (
+    "You are an expert presentation designer and subject-matter researcher. "
+    "You produce accurate, factual, well-structured slide decks. Never invent "
+    "statistics, quotes, dates, or names — if you are unsure of a specific "
+    "figure, state the point qualitatively instead of fabricating a number. "
+    "Write all slide text in Russian."
+)
+
+
+def _build_slides_prompt(topic: str, count: int | None) -> str:
+    if count:
+        count_rule = (
+            f"Create EXACTLY {count} content slides — no more, no fewer. "
+            "Break the topic into enough distinct sub-points to fill them "
+            "naturally; never pad with filler or repeat a point."
+        )
+    else:
+        count_rule = "Create 5 to 8 content slides."
+    return (
+        f"Create a clear, well-organized presentation about: {topic}\n\n"
+        "Return ONLY a JSON object (no prose, no code fences) with this shape:\n"
+        '{\n'
+        '  "title": "short deck title",\n'
+        '  "subtitle": "one-line subtitle",\n'
+        '  "slides": [\n'
+        '    {"heading": "slide heading", "bullets": ["point", "point", "point"]}\n'
+        "  ]\n"
+        "}\n\n"
+        f"Rules: {count_rule} Each slide 3 to 5 concise bullet points; each "
+        "bullet one short factual sentence. Logical flow (intro → key points → "
+        "conclusion). All text in Russian. Keep information accurate."
+    )
+
+
+@bot.message_handler(commands=["slides"], func=is_allowed)
+def cmd_slides(message):
+    args = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
+    count, topic = slides.parse_slides_request(args)
+    if not topic:
+        bot.send_message(
+            message.chat.id,
+            "📊 Usage: /slides [number] <topic>\n\n"
+            "Examples:\n"
+            "/slides история интернета\n"
+            "/slides 15 основы фотосинтеза\n"
+            "/slides как работает блокчейн, 20 slides\n\n"
+            "Add a number for exactly that many slides (up to "
+            f"{slides.MAX_SLIDES}), or leave it out and I'll choose. I'll build "
+            "a clean PowerPoint deck and send it back as a file. 📎",
+        )
+        return
+    note = ""
+    if count is not None:
+        if count > slides.MAX_SLIDES:
+            note = (
+                f"\n\nℹ️ {count} is a lot for one request — I capped it at "
+                f"{slides.MAX_SLIDES} so generation stays reliable."
+            )
+            count = slides.MAX_SLIDES
+        count = max(1, count)
+    try:
+        with keep_typing(message.chat.id):
+            # Force the main provider: /slides needs structured JSON, which the
+            # optional HF (ArmGPT) completion model can't produce.
+            raw = _call_main(
+                [
+                    {"role": "system", "content": _SLIDES_SYSTEM},
+                    {"role": "user", "content": _build_slides_prompt(topic, count)},
+                ]
+            )
+            title, subtitle, spec = slides.parse_deck_spec(raw)
+            with tempfile.TemporaryDirectory() as tmp:
+                out_path = os.path.join(tmp, "slides.pptx")
+                slides.build_deck(title, subtitle, spec, out_path)
+                stem = "".join(
+                    c if c.isalnum() or c in " -_" else "" for c in title
+                ).strip()[:60] or "presentation"
+                with open(out_path, "rb") as deck:
+                    bot.send_document(
+                        message.chat.id,
+                        deck,
+                        visible_file_name=f"{stem}.pptx",
+                        caption=f"📊 {title}{note}",
+                    )
+    except slides.SlideError as e:
+        bot.send_message(message.chat.id, f"❌ {e}")
+    except Exception as e:
+        print(f"/slides failed: {e}")
+        bot.send_message(
+            message.chat.id, "❌ Something went wrong building those slides."
+        )
 
 
 # /image — generate a brand-new image from a text prompt via Pollinations AI

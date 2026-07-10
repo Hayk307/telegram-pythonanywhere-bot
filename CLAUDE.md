@@ -31,7 +31,8 @@ telegram-pythonanywhere-bot/
 │   ├── dedupe.py         # Drops repeated update_ids when Telegram retries (graceful degradation)
 │   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
 │   ├── handlers.py       # All Telegram command and message handlers — add new commands here
-│   └── fileconvert.py    # /convertfile engine — image (Pillow) / media (ffmpeg) / doc (text-only); heavy libs imported lazily
+│   ├── fileconvert.py    # /convertfile engine — image (Pillow) / media (ffmpeg) / doc (text-only); heavy libs imported lazily
+│   └── slides.py         # /slides engine — AI JSON spec → themed .pptx via python-pptx (imported lazily)
 ├── tests/
 │   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, flask)
 │   ├── test_ai.py        # ask_ai() orchestration
@@ -39,6 +40,7 @@ telegram-pythonanywhere-bot/
 │   ├── test_preferences.py
 │   ├── test_handlers.py
 │   ├── test_fileconvert.py # /convertfile engine: parsing, family routing, real image/doc/media conversions
+│   ├── test_slides.py    # /slides engine: JSON spec parsing/clamping + real .pptx render (importorskip)
 │   ├── test_helpers.py
 │   ├── test_history.py
 │   ├── test_rate_limit.py
@@ -202,6 +204,19 @@ Cross-family requests (e.g. `pdf`→`mp3`) raise `ConversionError` with a clear 
 **Deploy note:** these deps are in `requirements.txt`, but `/api/deploy` only runs `git pull` + touch — it does **not** `pip install`. After pulling this on PA, run `pip install -r requirements.txt` in the virtualenv and reload the web app, or `/convertfile` will report the libraries as missing.
 
 ---
+
+## Slide decks (`/slides`)
+
+`/slides [number] <topic>` builds an attractive, downloadable PowerPoint deck on any topic. An optional leading number (or a "N slides" phrase) asks for that many slides — e.g. `/slides 15 история интернета` or `/slides блокчейн, 20 slides`; omit it and the AI picks 5–8. `cmd_slides` in `bot/handlers.py` calls `_call_main()` **directly** (bypassing the per-user provider preference) because the deck needs structured JSON, which the optional HF/ArmGPT completion model can't produce. The AI is prompted to return a strict JSON spec (`title`, `subtitle`, `slides[].heading`, `slides[].bullets`) and to write all text **in Russian** with **accurate, non-fabricated** facts.
+
+The engine lives in `bot/slides.py`:
+- `parse_slides_request(text)` — pure stdlib. Splits the command argument into `(requested_count | None, topic)`; a leading integer or a "N slides" phrase sets the count, otherwise `None` lets the AI choose. Testable without python-pptx.
+- `parse_deck_spec(raw)` — pure stdlib. Strips ```` ```json ```` fences and any prose around the object, extracts the outermost `{...}`, validates, and **clamps** to `MAX_SLIDES` (50) / `MAX_BULLETS` (6) so a runaway or over-large response can't produce a wall of text. Raises `SlideError` (user-facing) on anything unusable. Testable without python-pptx installed.
+- `build_deck(title, subtitle, slides, output_path)` — renders a single cohesive, modern theme (navy title slide with amber/azure accent strips; each content slide has a full-width navy header band with an amber top strip, an azure slide number, colored bullet dots, and a footer with the deck title + `n / total`) into a `.pptx`. **python-pptx is imported lazily inside this function** (same crash-safety contract as `fileconvert.py`): `bot/slides.py` imports only stdlib at module load, so `bot.handlers` still boots if python-pptx isn't installed — a `/slides` attempt just replies "not available (missing python-pptx)".
+
+**Slide count is capped at `MAX_SLIDES` (50).** The whole deck is produced in a single synchronous `_call_main()` inside Telegram's ~60s webhook window, so an unbounded count would risk a timeout or truncated JSON. Requests above the cap are clamped and the caption tells the user. Large decks are also more likely to fail JSON parsing (truncated output) — the error message suggests asking for fewer slides.
+
+**Deploy note:** `python-pptx` is in `requirements.txt`, but `/api/deploy` only runs `git pull` + touch — it does **not** `pip install`. After pulling this on PA, run `pip install -r requirements.txt` in the virtualenv and reload, or `/slides` reports the library as missing (same as `/convertfile`).
 
 ## PythonAnywhere deployment
 
