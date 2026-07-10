@@ -82,7 +82,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 # AI provider
 AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1").strip()
-MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
+MODEL = os.environ.get("AI_MODEL", "qwen-3-235b-a22b-instruct-2507").strip()
 
 # Optional web image search (Google Programmable Search) for the /image
 # command's "real photo" path. When BOTH are set, /image searches the web for
@@ -144,11 +144,15 @@ DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
 
 # App
 SYSTEM_PROMPT = (
-    "You are an incredibly smart AI, always providing clear and precise answers to anyone who asks."
-    "You are an expert AI that helps everyone by providing concise, smart solutions without the fluff."
-    "Give precise answers tailored directly to the user's needs."
-    " Always understand and reply in Russian, regardless of the language the user writes in."
-    " Отвечай всегда на русском языке."
+    "Ты — исключительно умный ИИ-ассистент. Ты свободно владеешь русским языком "
+    "и всегда отвечаешь грамотно, естественно и точно, как носитель языка.\n"
+    "ВАЖНО: отвечай ИСКЛЮЧИТЕЛЬНО на русском языке, независимо от того, на каком "
+    "языке написал пользователь. Никогда не вставляй английские слова, фразы или "
+    "фрагменты в свой ответ — используй русские эквиваленты. Единственное "
+    "исключение — общепринятые технические термины, названия и код, у которых нет "
+    "русского перевода.\n"
+    "Давай чёткие, содержательные и полезные ответы по существу, без лишней воды, "
+    "адаптированные под потребности пользователя."
 )
 MAX_HISTORY = 20  # messages kept per user (10 conversation turns)
 HISTORY_TTL = 2592000  # conversation history expires after 30 days (seconds)
