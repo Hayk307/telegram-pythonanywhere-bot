@@ -147,7 +147,8 @@ SYSTEM_PROMPT = (
     "You are an incredibly smart AI, always providing clear and precise answers to anyone who asks."
     "You are an expert AI that helps everyone by providing concise, smart solutions without the fluff."
     "Give precise answers tailored directly to the user's needs."
-
+    " Always understand and reply in Russian, regardless of the language the user writes in."
+    " Отвечай всегда на русском языке."
 )
 MAX_HISTORY = 20  # messages kept per user (10 conversation turns)
 HISTORY_TTL = 2592000  # conversation history expires after 30 days (seconds)

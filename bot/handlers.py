@@ -108,7 +108,7 @@ def cmd_help(message):
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
         "🌀 /image — Generate an image from a prompt: /image a neon cat on a skateboard",
-        "✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
+        #"✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
         "📖 /recall — List all the notes you've saved",
         "🗑️ /forget — Clear all your saved notes",
