@@ -18,6 +18,7 @@ parsing and the command parsing are testable without python-pptx installed.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 
@@ -340,21 +341,35 @@ def build_deck(title: str, subtitle: str, slides, output_path: str) -> str:
         np.alignment = PP_ALIGN.RIGHT
         add_run(np, str(index), size=30, color=_ACCENT, bold=True)
 
-        # Bullets — a colored dot run + dark text run per point. Font eases
-        # down a touch on dense slides so they still fit cleanly.
+        # Bullets — a colored dot run + dark text run per point. Font size
+        # scales up when there are few bullets, and the spacing between them is
+        # computed to spread the bullets down the FULL body height so the slide
+        # fills top-to-bottom instead of clustering in the upper half.
         bullets = spec["bullets"]
-        size = 20 if len(bullets) <= 5 else 18
+        n = len(bullets) or 1
+        size = {1: 32, 2: 30, 3: 28, 4: 26, 5: 24, 6: 22}.get(n, 20)
+        body_top = band_h + int(_IN * 0.45)
+        body_h = _SLIDE_H - body_top - int(_IN * 0.7)  # leave room for the footer
         body_box = slide.shapes.add_textbox(
-            Emu(margin),
-            Emu(band_h + int(_IN * 0.35)),
-            Emu(content_w),
-            Emu(_SLIDE_H - band_h - int(_IN * 0.9)),
+            Emu(margin), Emu(body_top), Emu(content_w), Emu(body_h)
         )
         btf = body_box.text_frame
         btf.word_wrap = True
+        btf.vertical_anchor = MSO_ANCHOR.TOP
+        # Distribute so bullets fill the body top-to-bottom. python-pptx can't
+        # measure wrapped text, so estimate how many lines each bullet takes
+        # (avg glyph ≈ 0.5em wide) and share the leftover height as equal gaps.
+        body_h_pt = body_h / 12700.0  # 12700 EMU per point
+        usable_pt = (content_w / 12700.0) * 0.92  # minus the bullet-dot indent
+        chars_per_line = max(1, int(usable_pt / (size * 0.5)))
+        est_lines = sum(max(1, math.ceil(len(b) / chars_per_line)) for b in bullets)
+        text_pt = est_lines * size * 1.2
+        gap_pt = (body_h_pt - text_pt) / n
+        gap_pt = max(8.0, min(gap_pt, 80.0))
         for i, bullet in enumerate(bullets):
             para = btf.paragraphs[0] if i == 0 else btf.add_paragraph()
-            para.space_after = Pt(14)
+            para.space_after = Pt(gap_pt)
+            para.line_spacing = 1.1
             add_run(para, "●  ", size=size, color=_ACCENT, bold=True)
             add_run(para, bullet, size=size, color=_TEXT_DARK)
 
@@ -403,10 +418,13 @@ def build_pdf(title: str, subtitle: str, slides, output_path: str) -> str:
     """
     try:
         from fpdf import FPDF
+        from fpdf.enums import MethodReturnValue
     except ImportError:
         raise SlideError("PDF export isn't available (missing fpdf2).")
     if not os.path.exists(_PDF_FONT_REGULAR):
         raise SlideError("PDF export isn't available (bundled font missing).")
+
+    _HEIGHT = MethodReturnValue.HEIGHT  # dry-run multi_cell returns wrapped height
 
     # 16:9 page in points (960 x 540 pt == 13.333 x 7.5 in), matching the .pptx.
     W, H = 960.0, 540.0
@@ -473,25 +491,42 @@ def build_pdf(title: str, subtitle: str, slides, output_path: str) -> str:
         pdf.set_xy(W - MARGIN - 90, BAND_H / 2 - 16)
         pdf.cell(90, 28, str(index), align="R")
 
-        # Bullets: azure dot + dark wrapping text.
+        # Bullets: azure dot + dark wrapping text. Font size scales up for few
+        # bullets, and gaps are computed from each bullet's measured (wrapped)
+        # height so the bullets spread down the FULL page instead of clustering
+        # near the top.
         bullets = spec["bullets"]
-        size = 15 if len(bullets) <= 5 else 13
-        line_h = size * 1.4
+        n = len(bullets) or 1
+        size = {1: 26, 2: 24, 3: 22, 4: 21, 5: 19, 6: 18}.get(n, 16)
+        line_h = size * 1.35
         dot_w = size * 1.4
-        pdf.set_y(BAND_H + 28)
-        for bullet in bullets:
-            y0 = pdf.get_y()
+        top_y = BAND_H + 26
+        bottom_y = H - 46  # keep clear of the footer
+        avail = bottom_y - top_y
+
+        pdf.set_font("DejaVu", "", size)
+        heights = [
+            pdf.multi_cell(
+                CONTENT_W - dot_w, line_h, b, dry_run=True, output=_HEIGHT
+            )
+            for b in bullets
+        ]
+        gap = (avail - sum(heights)) / n
+        gap = max(10.0, min(gap, 95.0))
+
+        y = top_y
+        for bullet, h in zip(bullets, heights):
             pdf.set_font("DejaVu", "B", size)
             text_color(_ACCENT)
-            pdf.set_xy(MARGIN, y0)
+            pdf.set_xy(MARGIN, y)
             pdf.cell(dot_w, line_h, "•")
             pdf.set_font("DejaVu", "", size)
             text_color(_TEXT_DARK)
-            pdf.set_xy(MARGIN + dot_w, y0)
+            pdf.set_xy(MARGIN + dot_w, y)
             pdf.multi_cell(
                 CONTENT_W - dot_w, line_h, bullet, align="L", new_x="LMARGIN", new_y="NEXT"
             )
-            pdf.set_y(pdf.get_y() + 8)
+            y += h + gap
 
         # Footer: thin accent rule, deck title (left), n / total (right).
         bar(MARGIN, H - 38, CONTENT_W, 1.2, _ACCENT)

@@ -256,6 +256,42 @@ def test_build_deck_has_animation_and_notes(tmp_path):
     assert any("the script" in z.read(n).decode("utf-8") for n in notes)
 
 
+def _bullet_font_pt(pptx_path):
+    """Font size (pt) of the bullet text box on the first content slide."""
+    from pptx import Presentation
+
+    prs = Presentation(pptx_path)
+    for shape in prs.slides[1].shapes:
+        if shape.has_text_frame and "●" in shape.text_frame.text:
+            return shape.text_frame.paragraphs[0].runs[0].font.size.pt
+    return None
+
+
+def test_build_deck_bullets_fill_and_scale(tmp_path):
+    pytest.importorskip("pptx")
+    few = tmp_path / "few.pptx"
+    many = tmp_path / "many.pptx"
+    slides.build_deck("T", "s", [{"heading": "H", "bullets": ["a", "b", "c"]}], str(few))
+    slides.build_deck(
+        "T", "s", [{"heading": "H", "bullets": [f"b{i}" for i in range(8)]}], str(many)
+    )
+    few_pt = _bullet_font_pt(str(few))
+    many_pt = _bullet_font_pt(str(many))
+    # Bumped well above the old flat 20pt, and fewer bullets get a bigger font.
+    assert few_pt >= 26
+    assert few_pt > many_pt
+
+    # The bullet box spans most of the slide height (fills, not clustered).
+    from pptx import Presentation
+
+    prs = Presentation(str(few))
+    body = next(
+        sh for sh in prs.slides[1].shapes
+        if sh.has_text_frame and "●" in sh.text_frame.text
+    )
+    assert body.height / prs.slide_height > 0.6
+
+
 def test_build_pdf_creates_pdf(tmp_path):
     pytest.importorskip("fpdf")
     out = tmp_path / "deck.pdf"
