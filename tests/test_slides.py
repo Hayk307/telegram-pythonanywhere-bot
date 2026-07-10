@@ -17,38 +17,80 @@ from bot import slides
 
 
 def test_request_no_count():
-    assert slides.parse_slides_request("история интернета") == (None, "история интернета")
+    assert slides.parse_slides_request("история интернета") == (
+        None,
+        "pptx",
+        "история интернета",
+    )
 
 
 def test_request_leading_count():
-    assert slides.parse_slides_request("15 основы фотосинтеза") == (15, "основы фотосинтеза")
+    assert slides.parse_slides_request("15 основы фотосинтеза") == (
+        15,
+        "pptx",
+        "основы фотосинтеза",
+    )
 
 
 def test_request_leading_count_with_separator():
-    assert slides.parse_slides_request("20, климат") == (20, "климат")
+    assert slides.parse_slides_request("20, климат") == (20, "pptx", "климат")
 
 
 def test_request_n_slides_phrase():
-    count, topic = slides.parse_slides_request("как работает блокчейн, 20 slides")
+    count, fmt, topic = slides.parse_slides_request("как работает блокчейн, 20 slides")
     assert count == 20
+    assert fmt == "pptx"
     assert topic == "как работает блокчейн"
 
 
 def test_request_bare_number_no_topic():
-    assert slides.parse_slides_request("12") == (12, "")
+    assert slides.parse_slides_request("12") == (12, "pptx", "")
 
 
 def test_request_empty():
-    assert slides.parse_slides_request("") == (None, "")
-    assert slides.parse_slides_request("   ") == (None, "")
+    assert slides.parse_slides_request("") == (None, "pptx", "")
+    assert slides.parse_slides_request("   ") == (None, "pptx", "")
 
 
 def test_request_number_inside_topic_is_not_a_count():
     # No leading number and no "N slides" phrase -> the digits stay in the topic.
     assert slides.parse_slides_request("top 10 programming languages") == (
         None,
+        "pptx",
         "top 10 programming languages",
     )
+
+
+# ── format detection ────────────────────────────────────────────────────────
+
+
+def test_request_pdf_trailing_token():
+    count, fmt, topic = slides.parse_slides_request("12 фотосинтез pdf")
+    assert (count, fmt, topic) == (12, "pdf", "фотосинтез")
+
+
+def test_request_pdf_as_phrase():
+    count, fmt, topic = slides.parse_slides_request("климат as pdf")
+    assert count is None
+    assert fmt == "pdf"
+    assert topic == "климат"
+
+
+def test_request_pdf_in_format_phrase():
+    _, fmt, topic = slides.parse_slides_request("15 блокчейн in pdf format")
+    assert fmt == "pdf"
+    assert topic == "блокчейн"
+
+
+def test_request_pptx_explicit():
+    _, fmt, topic = slides.parse_slides_request("история powerpoint")
+    assert fmt == "pptx"
+    assert topic == "история"
+
+
+def test_request_default_format_is_pptx():
+    _, fmt, _ = slides.parse_slides_request("любая тема")
+    assert fmt == "pptx"
 
 
 # ── parse_deck_spec: pure logic, no optional deps ───────────────────────────
@@ -169,3 +211,16 @@ def test_build_deck_creates_pptx(tmp_path):
         if shape.has_text_frame
     ]
     assert any("Интернет" in t for t in texts)
+
+
+def test_build_pdf_creates_pdf(tmp_path):
+    pytest.importorskip("fpdf")
+    out = tmp_path / "deck.pdf"
+    title, subtitle, deck = slides.parse_deck_spec(_spec())
+    result = slides.build_pdf(title, subtitle, deck, str(out))
+    assert result == str(out)
+    assert out.exists()
+    data = out.read_bytes()
+    assert data[:5] == b"%PDF-"  # valid PDF signature
+    assert len(data) > 1000
+

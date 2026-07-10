@@ -18,7 +18,18 @@ parsing and the command parsing are testable without python-pptx installed.
 from __future__ import annotations
 
 import json
+import os
 import re
+
+# Bundled Unicode font so PDF export renders non-Latin text (e.g. Russian).
+# fpdf2's built-in core fonts are Latin-1 only, so Cyrillic would become "?"
+# without a TrueType font that has the glyphs. DejaVu Sans is freely
+# redistributable and ships in bot/assets/fonts/.
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+_PDF_FONT_REGULAR = os.path.join(_FONT_DIR, "DejaVuSans.ttf")
+_PDF_FONT_BOLD = os.path.join(_FONT_DIR, "DejaVuSans-Bold.ttf")
+
+VALID_FORMATS = ("pptx", "pdf")
 
 # Upper safety ceiling. The user can ask for any number of slides up to this;
 # beyond it a single AI call (bounded by Telegram's ~60s webhook window and the
@@ -54,25 +65,42 @@ def _clean(value) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def parse_slides_request(text: str):
-    """Split the /slides argument into (requested_count | None, topic).
+_FMT_WORD = r"(pdf|pptx|ppt|powerpoint|powerpoint)"
 
-    Accepts a leading count ("20 climate change") or a "N slides" phrase
-    anywhere ("climate change, 20 slides"). Returns (None, topic) when no
-    count is given, letting the AI choose a sensible length. A bare number
-    with no topic yields (count, "").
+
+def parse_slides_request(text: str):
+    """Split the /slides argument into (count | None, fmt, topic).
+
+    - fmt is "pdf" or "pptx" (default). Set by a format word anywhere:
+      "as pdf", "in pdf format", or a bare "pdf" / "pptx" token, which is
+      stripped from the topic.
+    - count comes from a leading number ("20 climate change") or a
+      "N slides" phrase ("climate change, 20 slides"); None lets the AI choose.
+    - A bare number with no topic yields (count, fmt, "").
     """
     text = _clean(text)
+    fmt = "pptx"
     if not text:
-        return None, ""
+        return None, fmt, ""
+
+    m = re.search(
+        r"\b(?:as|to|in)\s+(?:an?\s+)?" + _FMT_WORD + r"(?:\s+format)?\b",
+        text,
+        re.IGNORECASE,
+    ) or re.search(r"\b" + _FMT_WORD + r"\b", text, re.IGNORECASE)
+    if m:
+        fmt = "pdf" if m.group(1).lower() == "pdf" else "pptx"
+        text = (text[: m.start()] + " " + text[m.end() :]).strip()
+        text = re.sub(r"\s+", " ", text).strip(" ,.:;-")
+
     m = re.match(r"^(\d{1,3})\b[\s,.:;-]*(.*)$", text)
     if m:
-        return int(m.group(1)), m.group(2).strip()
+        return int(m.group(1)), fmt, m.group(2).strip()
     m = re.search(r"(\d{1,3})\s*slides?\b", text, re.IGNORECASE)
     if m:
         topic = (text[: m.start()] + text[m.end() :]).strip(" ,.:;-")
-        return int(m.group(1)), topic
-    return None, text
+        return int(m.group(1)), fmt, topic
+    return None, fmt, text
 
 
 def parse_deck_spec(raw: str):
@@ -262,4 +290,116 @@ def build_deck(title: str, subtitle: str, slides, output_path: str) -> str:
         add_run(fnp, f"{index} / {total}", size=10, color=_MUTED)
 
     prs.save(output_path)
+    return output_path
+
+
+def build_pdf(title: str, subtitle: str, slides, output_path: str) -> str:
+    """Render the spec into a themed PDF at output_path (same look as the .pptx).
+
+    Uses fpdf2 (already a dependency, imported lazily) with a bundled DejaVu
+    Sans TTF so non-Latin text (Russian) renders instead of turning into "?".
+    Raises SlideError if fpdf2 or the bundled font is unavailable.
+    """
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        raise SlideError("PDF export isn't available (missing fpdf2).")
+    if not os.path.exists(_PDF_FONT_REGULAR):
+        raise SlideError("PDF export isn't available (bundled font missing).")
+
+    # 16:9 page in points (960 x 540 pt == 13.333 x 7.5 in), matching the .pptx.
+    W, H = 960.0, 540.0
+    MARGIN = 60.0
+    BAND_H = 90.0
+    CONTENT_W = W - 2 * MARGIN
+
+    pdf = FPDF(orientation="L", unit="pt", format=(W, H))
+    pdf.set_auto_page_break(False)  # one slide == one page; we place everything
+    pdf.set_margins(MARGIN, MARGIN, MARGIN)
+    pdf.add_font("DejaVu", "", _PDF_FONT_REGULAR)
+    if os.path.exists(_PDF_FONT_BOLD):
+        pdf.add_font("DejaVu", "B", _PDF_FONT_BOLD)
+    else:
+        # Fall back to the regular face for "bold" so set_font never fails.
+        pdf.add_font("DejaVu", "B", _PDF_FONT_REGULAR)
+
+    def fill(rgb):
+        pdf.set_fill_color(*rgb)
+
+    def text_color(rgb):
+        pdf.set_text_color(*rgb)
+
+    def bar(x, y, w, h, rgb):
+        fill(rgb)
+        pdf.rect(x, y, w, h, style="F")
+
+    total = len(slides)
+    footer_title = (title[:57] + "…") if len(title) > 58 else title
+
+    # ── Title page ───────────────────────────────────────────────────────────
+    pdf.add_page()
+    bar(0, 0, W, H, _PRIMARY)          # full navy field
+    bar(0, 0, W, 10, _HIGHLIGHT)       # amber top strip
+    bar(0, H - 10, W, 10, _ACCENT)     # azure bottom strip
+
+    pdf.set_font("DejaVu", "B", 34)
+    text_color(_TEXT_LIGHT)
+    pdf.set_xy(MARGIN, H * 0.34)
+    pdf.multi_cell(CONTENT_W, 42, title, align="C")
+    if subtitle:
+        pdf.set_font("DejaVu", "", 18)
+        text_color(_SUBTLE)
+        pdf.set_xy(MARGIN, pdf.get_y() + 12)
+        pdf.multi_cell(CONTENT_W, 24, subtitle, align="C")
+    underline_y = pdf.get_y() + 14
+    bar(W / 2 - 72, underline_y, 144, 5, _HIGHLIGHT)  # centered amber underline
+
+    # ── Content pages ─────────────────────────────────────────────────────────
+    for index, spec in enumerate(slides, start=1):
+        pdf.add_page()
+        bar(0, 0, W, BAND_H, _PRIMARY)  # header band
+        bar(0, 0, W, 8, _HIGHLIGHT)     # amber accent strip
+
+        # Heading (white, left), vertically centered in the band.
+        pdf.set_font("DejaVu", "B", 22)
+        text_color(_TEXT_LIGHT)
+        pdf.set_xy(MARGIN, BAND_H / 2 - 16)
+        pdf.multi_cell(CONTENT_W - 90, 26, spec["heading"], align="L")
+
+        # Slide number (azure) on the right of the band.
+        pdf.set_font("DejaVu", "B", 24)
+        text_color(_ACCENT)
+        pdf.set_xy(W - MARGIN - 90, BAND_H / 2 - 16)
+        pdf.cell(90, 28, str(index), align="R")
+
+        # Bullets: azure dot + dark wrapping text.
+        bullets = spec["bullets"]
+        size = 15 if len(bullets) <= 5 else 13
+        line_h = size * 1.4
+        dot_w = size * 1.4
+        pdf.set_y(BAND_H + 28)
+        for bullet in bullets:
+            y0 = pdf.get_y()
+            pdf.set_font("DejaVu", "B", size)
+            text_color(_ACCENT)
+            pdf.set_xy(MARGIN, y0)
+            pdf.cell(dot_w, line_h, "•")
+            pdf.set_font("DejaVu", "", size)
+            text_color(_TEXT_DARK)
+            pdf.set_xy(MARGIN + dot_w, y0)
+            pdf.multi_cell(
+                CONTENT_W - dot_w, line_h, bullet, align="L", new_x="LMARGIN", new_y="NEXT"
+            )
+            pdf.set_y(pdf.get_y() + 8)
+
+        # Footer: thin accent rule, deck title (left), n / total (right).
+        bar(MARGIN, H - 38, CONTENT_W, 1.2, _ACCENT)
+        pdf.set_font("DejaVu", "", 9)
+        text_color(_MUTED)
+        pdf.set_xy(MARGIN, H - 32)
+        pdf.cell(CONTENT_W / 2, 12, footer_title, align="L")
+        pdf.set_xy(MARGIN + CONTENT_W / 2, H - 32)
+        pdf.cell(CONTENT_W / 2, 12, f"{index} / {total}", align="R")
+
+    pdf.output(output_path)
     return output_path

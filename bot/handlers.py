@@ -109,7 +109,7 @@ def cmd_help(message):
         "✍️ /doc — Add comments to your code: /doc <language> <code>",
         "💱 /currency — Convert money or crypto: /currency 50$ to amd",
         "🎓 /explain — Explain a topic or term simply: /explain recursion",
-        "📊 /slides — Build a PowerPoint deck on any topic: /slides 15 история интернета",
+        "📊 /slides — Build a PowerPoint (or PDF) deck: /slides 15 история интернета — add `pdf` for a PDF",
         "🌀 /image — Generate an image from a prompt: /image a neon cat on a skateboard",
         #"✏️ /edit — Edit a photo with a prompt; send/reply to a photo with /edit make it winter",
         "📝 /remember — Save a quick note for the AI to remember",
@@ -383,18 +383,19 @@ def _build_slides_prompt(topic: str, count: int | None) -> str:
 @bot.message_handler(commands=["slides"], func=is_allowed)
 def cmd_slides(message):
     args = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
-    count, topic = slides.parse_slides_request(args)
+    count, fmt, topic = slides.parse_slides_request(args)
     if not topic:
         bot.send_message(
             message.chat.id,
-            "📊 Usage: /slides [number] <topic>\n\n"
+            "📊 Usage: /slides [number] <topic> [pdf]\n\n"
             "Examples:\n"
             "/slides история интернета\n"
             "/slides 15 основы фотосинтеза\n"
-            "/slides как работает блокчейн, 20 slides\n\n"
+            "/slides как работает блокчейн, 20 slides\n"
+            "/slides 12 фотосинтез pdf\n\n"
             "Add a number for exactly that many slides (up to "
-            f"{slides.MAX_SLIDES}), or leave it out and I'll choose. I'll build "
-            "a clean PowerPoint deck and send it back as a file. 📎",
+            f"{slides.MAX_SLIDES}). Add `pdf` for a PDF instead of PowerPoint "
+            "(the default). I'll build the deck and send it back as a file. 📎",
         )
         return
     note = ""
@@ -418,8 +419,11 @@ def cmd_slides(message):
             )
             title, subtitle, spec = slides.parse_deck_spec(raw)
             with tempfile.TemporaryDirectory() as tmp:
-                out_path = os.path.join(tmp, "slides.pptx")
-                slides.build_deck(title, subtitle, spec, out_path)
+                out_path = os.path.join(tmp, f"slides.{fmt}")
+                if fmt == "pdf":
+                    slides.build_pdf(title, subtitle, spec, out_path)
+                else:
+                    slides.build_deck(title, subtitle, spec, out_path)
                 stem = "".join(
                     c if c.isalnum() or c in " -_" else "" for c in title
                 ).strip()[:60] or "presentation"
@@ -427,7 +431,7 @@ def cmd_slides(message):
                     bot.send_document(
                         message.chat.id,
                         deck,
-                        visible_file_name=f"{stem}.pptx",
+                        visible_file_name=f"{stem}.{fmt}",
                         caption=f"📊 {title}{note}",
                     )
     except slides.SlideError as e:
