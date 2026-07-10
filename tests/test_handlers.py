@@ -744,6 +744,79 @@ def test_handle_file_caption_edit_path_edits_photo():
         mock_bot.send_photo.assert_called_once()
 
 
+# ── Telegram Desktop flow: drop a photo, then /edit as a separate message ────
+
+
+def test_handle_file_bare_photo_remembers_and_prompts(tmp_path):
+    """A photo with no caption is remembered and the user gets a next-step hint."""
+    from bot.store import SqliteStore
+
+    real_store = SqliteStore(str(tmp_path / "s.db"))
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.store", real_store),
+    ):
+        from bot.handlers import handle_file
+
+        handle_file(make_photo_message(caption=None, user_id=123))
+
+        assert real_store.get("lastphoto:123") == "PHOTOID"
+        mock_bot.send_message.assert_called_once()
+        assert "photo" in mock_bot.send_message.call_args[0][1].lower()
+
+
+def test_cmd_edit_uses_remembered_photo_when_no_reply(tmp_path):
+    """/edit with no reply falls back to the user's last-sent photo."""
+    from bot.store import SqliteStore
+
+    real_store = SqliteStore(str(tmp_path / "s.db"))
+    real_store.set("lastphoto:123", "PHOTOID")
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.store", real_store),
+        patch("bot.handlers.keep_typing") as mock_keep,
+        patch(
+            "bot.handlers._edit_image",
+            return_value=(b"\xff\xd8edited", "image/png"),
+        ) as mock_edit,
+    ):
+        _patch_edit_typing(mock_keep)
+        mock_bot.get_file.return_value = MagicMock(file_path="photos/f.jpg")
+        mock_bot.download_file.return_value = b"src-bytes"
+
+        from bot.handlers import cmd_edit
+
+        msg = make_photo_message(text="/edit make it snowy", user_id=123)
+        msg.content_type = "text"  # the /edit command arrives as its own message
+        msg.photo = None  # the command message itself carries no photo
+        cmd_edit(msg)
+
+        mock_bot.get_file.assert_called_once_with("PHOTOID")
+        assert mock_edit.call_args[0][0] == "make it snowy"
+        mock_bot.send_photo.assert_called_once()
+
+
+def test_cmd_edit_no_photo_and_no_memory_prompts(tmp_path):
+    """/edit with no reply and nothing remembered asks for a photo (no crash)."""
+    from bot.store import SqliteStore
+
+    real_store = SqliteStore(str(tmp_path / "s.db"))
+    with (
+        patch("bot.handlers.bot") as mock_bot,
+        patch("bot.handlers.store", real_store),
+        patch("bot.handlers._edit_image") as mock_edit,
+    ):
+        from bot.handlers import cmd_edit
+
+        msg = make_photo_message(text="/edit make it snowy", user_id=555)
+        msg.content_type = "text"
+        msg.photo = None
+        cmd_edit(msg)
+
+        mock_edit.assert_not_called()
+        mock_bot.send_message.assert_called_once()
+
+
 def test_cmd_edit_without_reply_asks_for_photo():
     """A bare /edit (no photo to work on) prompts the user for one."""
     with patch("bot.handlers.bot") as mock_bot:

@@ -213,6 +213,49 @@ def test_build_deck_creates_pptx(tmp_path):
     assert any("Интернет" in t for t in texts)
 
 
+def test_parse_captures_notes():
+    raw = json.dumps(
+        {"title": "T", "slides": [{"heading": "H", "bullets": ["b"], "notes": "speaker script"}]}
+    )
+    _, _, deck = slides.parse_deck_spec(raw)
+    assert deck[0]["notes"] == "speaker script"
+
+
+def test_parse_notes_optional():
+    raw = json.dumps({"title": "T", "slides": [{"heading": "H", "bullets": ["b"]}]})
+    _, _, deck = slides.parse_deck_spec(raw)
+    assert deck[0]["notes"] == ""
+
+
+def test_build_deck_has_animation_and_notes(tmp_path):
+    pytest.importorskip("pptx")
+    import zipfile
+
+    out = tmp_path / "anim.pptx"
+    deck = [
+        {"heading": "Alpha", "bullets": ["one", "two", "three"], "notes": "the script"},
+    ]
+    slides.build_deck("Title", "Sub", deck, str(out))
+
+    # The file must still be a valid, re-openable presentation after we inject
+    # raw animation XML.
+    from pptx import Presentation
+
+    prs = Presentation(str(out))
+    assert len(prs.slides) == 2  # title + 1 content
+
+    z = zipfile.ZipFile(str(out))
+    content = z.read("ppt/slides/slide2.xml").decode("utf-8")
+    assert "p:timing" in content            # entrance animation injected
+    assert content.count("clickEffect") == 3  # one per bullet
+    assert "p:fade" in content              # slide transition
+    assert "p:bldP" in content              # paragraph-level build
+    # Speaker notes were written to a notes slide.
+    notes = [n for n in z.namelist() if n.startswith("ppt/notesSlides/notesSlide")]
+    assert notes
+    assert any("the script" in z.read(n).decode("utf-8") for n in notes)
+
+
 def test_build_pdf_creates_pdf(tmp_path):
     pytest.importorskip("fpdf")
     out = tmp_path / "deck.pdf"

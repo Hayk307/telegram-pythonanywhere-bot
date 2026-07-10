@@ -39,6 +39,7 @@ MAX_SLIDES = 50
 MAX_BULLETS = 6
 MAX_HEADING_LEN = 120
 MAX_BULLET_LEN = 300
+MAX_NOTES_LEN = 1200  # speaker notes per slide (PPTX notes pane)
 
 # 16:9 widescreen, measured in EMU (English Metric Units; 914400 EMU = 1 inch).
 _SLIDE_W = 12192000  # 13.333 in
@@ -138,18 +139,107 @@ def parse_deck_spec(raw: str):
             bullet = _clean(bullet)[:MAX_BULLET_LEN]
             if bullet:
                 bullets.append(bullet)
+        notes = _clean(item.get("notes"))[:MAX_NOTES_LEN]
         if heading or bullets:
-            slides.append({"heading": heading or title, "bullets": bullets})
+            slides.append(
+                {"heading": heading or title, "bullets": bullets, "notes": notes}
+            )
 
     if not slides:
         raise SlideError("The AI returned no usable slides. Try a clearer topic.")
     return title, subtitle, slides
 
 
+# Namespaces for the raw animation XML we inject (python-pptx exposes no API).
+_P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def _add_fade_transition(slide) -> None:
+    """Add a fade transition when advancing TO this slide."""
+    from pptx.oxml import parse_xml
+
+    xml = (
+        f'<p:transition xmlns:p="{_P_NS}" xmlns:a="{_A_NS}" spd="med">'
+        f"<p:fade/></p:transition>"
+    )
+    # Schema order in <p:sld> is cSld, clrMapOvr, transition, timing — both
+    # transition and timing come after the existing children, so append works.
+    slide._element.append(parse_xml(xml))
+
+
+def _add_bullet_build(slide, shape_id: int, n_paragraphs: int) -> None:
+    """Inject a per-paragraph 'fade in on click' entrance animation.
+
+    Builds the <p:timing> tree PowerPoint uses for a "Fade / By paragraph"
+    entrance: each paragraph of the bullet text box (identified by shape_id)
+    reveals on its own click. This is hand-written OOXML because python-pptx
+    has no animation API; malformed timing would make PowerPoint drop the
+    animation (or refuse the file), so the structure mirrors what PowerPoint
+    itself emits and is covered by a round-trip test.
+    """
+    from pptx.oxml import parse_xml
+
+    # Unique cTn ids across the whole tree; 1 and 2 are the root + mainSeq.
+    counter = [3]
+
+    def next_id():
+        val = counter[0]
+        counter[0] += 1
+        return val
+
+    effects = []
+    for i in range(n_paragraphs):
+        a, b, c, d, e = (next_id() for _ in range(5))
+        tgt = (
+            f'<p:spTgt spid="{shape_id}"><p:txEl>'
+            f'<p:pRg st="{i}" end="{i}"/></p:txEl></p:spTgt>'
+        )
+        effects.append(
+            f"<p:par><p:cTn id=\"{a}\" fill=\"hold\">"
+            f'<p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>'
+            f"<p:childTnLst><p:par><p:cTn id=\"{b}\" fill=\"hold\">"
+            f'<p:stCondLst><p:cond delay="0"/></p:stCondLst>'
+            f"<p:childTnLst><p:par><p:cTn id=\"{c}\" presetID=\"10\" "
+            f'presetClass="entr" presetSubtype="0" fill="hold" grpId="0" '
+            f'nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/>'
+            f"</p:stCondLst><p:childTnLst>"
+            f"<p:set><p:cBhvr><p:cTn id=\"{d}\" dur=\"1\" fill=\"hold\">"
+            f'<p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn>'
+            f"<p:tgtEl>{tgt}</p:tgtEl>"
+            f"<p:attrNameLst><p:attrName>style.visibility</p:attrName>"
+            f"</p:attrNameLst></p:cBhvr>"
+            f'<p:to><p:strVal val="visible"/></p:to></p:set>'
+            f'<p:animEffect transition="in" filter="fade"><p:cBhvr>'
+            f"<p:cTn id=\"{e}\" dur=\"500\"/>"
+            f"<p:tgtEl>{tgt}</p:tgtEl></p:cBhvr></p:animEffect>"
+            f"</p:childTnLst></p:cTn></p:par></p:childTnLst>"
+            f"</p:cTn></p:par></p:childTnLst></p:cTn></p:par>"
+        )
+
+    xml = (
+        f'<p:timing xmlns:p="{_P_NS}" xmlns:a="{_A_NS}"><p:tnLst><p:par>'
+        f'<p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot">'
+        f'<p:childTnLst><p:seq concurrent="1" nextAc="seek">'
+        f'<p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>'
+        f"{''.join(effects)}"
+        f"</p:childTnLst></p:cTn>"
+        f'<p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl>'
+        f"<p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>"
+        f'<p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl>'
+        f"<p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>"
+        f"</p:seq></p:childTnLst></p:cTn></p:par></p:tnLst>"
+        f'<p:bldLst><p:bldP spid="{shape_id}" grpId="0" build="p"/></p:bldLst>'
+        f"</p:timing>"
+    )
+    slide._element.append(parse_xml(xml))
+
+
 def build_deck(title: str, subtitle: str, slides, output_path: str) -> str:
     """Render the spec into an attractive, themed .pptx at output_path.
 
-    Raises SlideError if python-pptx isn't installed.
+    Content slides get speaker notes and a per-bullet fade-in entrance
+    animation. Raises SlideError if python-pptx isn't installed.
     """
     try:
         from pptx import Presentation
@@ -267,6 +357,17 @@ def build_deck(title: str, subtitle: str, slides, output_path: str) -> str:
             para.space_after = Pt(14)
             add_run(para, "●  ", size=size, color=_ACCENT, bold=True)
             add_run(para, bullet, size=size, color=_TEXT_DARK)
+
+        # Speaker notes (elaboration the AI wrote) go in the notes pane.
+        if spec.get("notes"):
+            slide.notes_slide.notes_text_frame.text = spec["notes"]
+
+        # Entrance animation: fade each bullet in one-by-one on click, plus a
+        # slide fade transition. python-pptx has no animation API, so we inject
+        # the timing XML directly (see _add_bullet_build / _add_fade_transition).
+        if bullets:
+            _add_bullet_build(slide, body_box.shape_id, len(bullets))
+        _add_fade_transition(slide)
 
         # Footer: thin accent line, deck title (left), n / total (right).
         rect(

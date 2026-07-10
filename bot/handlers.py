@@ -348,10 +348,11 @@ def cmd_explain(message):
 # there, so this command degrades gracefully if the lib isn't installed yet.
 _SLIDES_SYSTEM = (
     "You are an expert presentation designer and subject-matter researcher. "
-    "You produce accurate, factual, well-structured slide decks. Never invent "
-    "statistics, quotes, dates, or names — if you are unsure of a specific "
-    "figure, state the point qualitatively instead of fabricating a number. "
-    "Write all slide text in Russian."
+    "You produce accurate, factual, information-rich slide decks with real "
+    "substance — concrete facts, mechanisms, examples, and figures — not vague "
+    "one-liners. Never invent statistics, quotes, dates, or names; if you are "
+    "unsure of a specific figure, state the point qualitatively instead of "
+    "fabricating a number. Write all slide text in Russian."
 )
 
 
@@ -363,20 +364,27 @@ def _build_slides_prompt(topic: str, count: int | None) -> str:
             "naturally; never pad with filler or repeat a point."
         )
     else:
-        count_rule = "Create 5 to 8 content slides."
+        count_rule = "Create 6 to 9 content slides."
     return (
-        f"Create a clear, well-organized presentation about: {topic}\n\n"
+        f"Create a rich, well-organized, informative presentation about: {topic}\n\n"
         "Return ONLY a JSON object (no prose, no code fences) with this shape:\n"
-        '{\n'
+        "{\n"
         '  "title": "short deck title",\n'
         '  "subtitle": "one-line subtitle",\n'
         '  "slides": [\n'
-        '    {"heading": "slide heading", "bullets": ["point", "point", "point"]}\n'
+        "    {\n"
+        '      "heading": "slide heading",\n'
+        '      "bullets": ["informative sentence", "informative sentence", "..."],\n'
+        '      "notes": "2-4 sentence speaker script expanding on this slide"\n'
+        "    }\n"
         "  ]\n"
         "}\n\n"
-        f"Rules: {count_rule} Each slide 3 to 5 concise bullet points; each "
-        "bullet one short factual sentence. Logical flow (intro → key points → "
-        "conclusion). All text in Russian. Keep information accurate."
+        f"Rules: {count_rule} Each slide has 4 to 6 bullet points, and each "
+        "bullet is a complete, substantive sentence that actually teaches "
+        "something (a fact, cause, example, or figure) — not a two-word "
+        "fragment. Add a 'notes' field per slide: a 2-4 sentence speaker script "
+        "that elaborates beyond the bullets. Logical flow (intro → key points → "
+        "conclusion). All text in Russian. Keep every fact accurate."
     )
 
 
@@ -575,6 +583,33 @@ def _photo_file_id(msg):
     if doc and (getattr(doc, "mime_type", "") or "").startswith("image/"):
         return doc.file_id
     return None
+
+
+# Telegram Desktop's natural flow is: drag-drop a photo (usually with NO
+# caption), then type the command in a separate message. The bot otherwise
+# only accepts /edit as the photo's caption or as a reply — neither happens in
+# that flow, so it works on mobile (caption) but "doesn't work on computer".
+# We remember each user's most recent photo so a follow-up /edit can use it.
+LAST_PHOTO_TTL = 3600  # seconds
+
+
+def _remember_last_photo(user_id: int, file_id: str) -> None:
+    if store is None or not file_id:
+        return
+    try:
+        store.set(f"lastphoto:{user_id}", file_id, ex=LAST_PHOTO_TTL)
+    except Exception as e:
+        print(f"remember last photo failed: {e}")
+
+
+def _recall_last_photo(user_id: int):
+    if store is None:
+        return None
+    try:
+        return store.get(f"lastphoto:{user_id}") or None
+    except Exception as e:
+        print(f"recall last photo failed: {e}")
+        return None
 
 
 class _EditError(Exception):
@@ -779,9 +814,10 @@ def _run_edit(message, file_id: str, prompt: str) -> None:
 
 _EDIT_USAGE = (
     "✏️ Usage: send me a photo and edit it with a prompt.\n\n"
-    "Two ways:\n"
+    "Three ways:\n"
     "1️⃣ Send a photo with the caption: /edit make it look like winter\n"
-    "2️⃣ Reply to a photo with: /edit turn it into a watercolor painting\n\n"
+    "2️⃣ Reply to a photo with: /edit turn it into a watercolor painting\n"
+    "3️⃣ Send a photo, then send /edit make it winter as the next message\n\n"
     "I'll apply your change and send the edited image back. 🎨"
 )
 
@@ -789,15 +825,18 @@ _EDIT_USAGE = (
 @bot.message_handler(commands=["edit"], func=is_allowed)
 def cmd_edit(message):
     prompt = message.text.split(maxsplit=1)[1].strip() if " " in message.text else ""
-    # The photo must come from the message being replied to (a bare /edit
-    # command has no image of its own — the caption path is handled in
-    # handle_file, where the photo and its /edit caption arrive together).
-    file_id = _photo_file_id(getattr(message, "reply_to_message", None))
+    # Prefer the photo being replied to (or captioned — that path is handled in
+    # handle_file). Otherwise fall back to the most recent photo the user sent,
+    # so the Telegram Desktop flow (drop a photo, then type /edit in a separate
+    # message) works instead of only the mobile caption flow.
+    file_id = _photo_file_id(getattr(message, "reply_to_message", None)) or _recall_last_photo(
+        message.from_user.id
+    )
     if file_id is None:
         bot.send_message(
             message.chat.id,
-            "✏️ I need a photo to edit. Reply to one with /edit <prompt>, or "
-            "send a photo captioned /edit <prompt>.\n\n" + _EDIT_USAGE,
+            "✏️ I need a photo to edit. Send a photo first, then /edit <prompt> — "
+            "or reply to a photo with /edit <prompt>.\n\n" + _EDIT_USAGE,
         )
         return
     if not prompt:
@@ -1051,14 +1090,19 @@ def handle_file(message):
     # conversion. Command handlers only match message.text, and a photo's text
     # lives in message.caption, so we route it here before the convert flow.
     caption = (message.caption or "").strip()
+    # Remember any incoming photo so a later /edit (sent as its own message —
+    # the Telegram Desktop drag-drop flow) can act on it.
+    image_id = _photo_file_id(message)
+    if image_id is not None:
+        _remember_last_photo(message.from_user.id, image_id)
+
     if caption.startswith("/edit"):
-        photo_id = _photo_file_id(message)
-        if photo_id is not None:
+        if image_id is not None:
             prompt = caption.split(maxsplit=1)[1].strip() if " " in caption else ""
             if not prompt:
                 bot.send_message(message.chat.id, _EDIT_USAGE)
                 return
-            _run_edit(message, photo_id, prompt)
+            _run_edit(message, image_id, prompt)
             return
 
     file_id, file_name, file_size = _incoming_file(message)
@@ -1066,6 +1110,17 @@ def handle_file(message):
         return
     target = fileconvert.parse_target_format(message.caption)
     if not target:
+        if image_id is not None:
+            # A bare photo with no caption: the user likely wants to edit it
+            # (common on Telegram Desktop, where you drop the image first).
+            bot.send_message(
+                message.chat.id,
+                "🖼️ Got your photo. Now tell me what to do:\n"
+                "✏️ Edit it — send `/edit <what to change>`\n"
+                "📎 Convert it — resend with the format as the caption (e.g. `png`).",
+                parse_mode="Markdown",
+            )
+            return
         bot.send_message(
             message.chat.id,
             "📎 Add the format you want as the file's caption, e.g. `mp3` or "
